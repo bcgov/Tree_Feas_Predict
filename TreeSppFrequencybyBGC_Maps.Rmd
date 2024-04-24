@@ -1,0 +1,236 @@
+---
+title: "TreeSpeciesRanking"
+author: "William H MacKenzie"
+date: "02/10/2019"
+output: html_document
+---
+
+# Tree Species Environmental Suitability  - March 16, 2019
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(XML)
+require (RGtk2)
+require(plyr)
+require (rChoiceDialogs)
+require (data.table)
+require(doBy)
+require (utils)
+require(labdsv)
+require(tools )
+require(svDialogs)
+require(tcltk)
+require(randomForest)
+require(foreach)
+require(dplyr)
+require(reshape2)
+require(reshape)
+require(doParallel)
+require(caret)
+require(C50)
+require (stringr)
+require(UBL)
+require(dostats)
+require(ordinalForest)
+require(tidyverse)
+require(ggplot2)
+require (RGtk2)
+require(janitor)
+require (rgdal)
+require(mapview)
+require(sf)
+require(tmap)
+require(tidyverse)
+require(rmapshaper)
+require(rgeos)
+require(raster)
+require(devtools)
+#require(cleangeo)
+
+rm(list = ls(all.names = TRUE)) # clears all environment objects including hidden objects
+
+options(stringsAsFactors = FALSE)
+## set up some folder location variables
+outputs <- ("./outputs/") # location of model outputs 
+inputs <- ("./inputs/") 
+DB_share <- ("C:/Users/whmacken/Dropbox (WorkingFiles_Telus)/Suitability Review/")
+DB_share2 <- ("C:/Users/whmacken/Dropbox (WorkingFiles_Telus)/CCISS paper/Inputdata/")
+```
+
+#BGC map themed to species suitability
+
+```{r plot suitability}
+
+ #WNA_BGC <- readOGR("D:/CommonTables/BGC_Maps/WNA_BGC_v11_31Dec2019.shp")# must be dissolved
+WNA_BGC <- readOGR("./inputs/WNA_dissolved_v1.gpkg") %>% clean_names()# for dev use
+#BGC_simple <- rmapshaper::ms_simplify(WNA_BGC, keep = 0.01) 
+#CCISS_ESuit2 <- fread("./outputs/ESuit_CCISSPaper_new.csv", data.table = FALSE) ## this file is being updated adhoc - to be merged back into the master suitability list
+CCISS_ESuit <- fread("./inputs/Feasibility_v12_13_w_OHR.csv", data.table = FALSE)# %>% filter(!OHR == "OHR")
+edatopic <- fread("./inputs/Edatopic_v12_12.csv", data.table = FALSE) %>% clean_names()
+##estimate frequency by BGC
+source("./_functions/SppFrequencyCalc.R")
+bgc_freq <- frequency_bgc(CCISS_ESuit, edatopic) %>% mutate(spp = sppsplit)
+
+# SS_use <- fread("./inputs/SiteSeries_Use_CCISSpaper_24Mar2020.csv", data.table = FALSE) %>% clean_names() %>% mutate(ss_nospace = ss_no_space)
+# CCISS_ESuit2 <- left_join(SS_use, CCISS_ESuit)
+#Create a dataframe with all a column containing country ID and another with an assigned color:
+# BGC_col <- data.frame(
+#   BGC = WNA_BGC$bgc,
+#   mycolors = c(rep("#e5e5e5",367)), #Assign the same color to all regions initilally. Number of merged BGCs required
+#   stringsAsFactors = FALSE
+# ) %>% clean_names()
+
+#Highlight some selected regions by looking up the 3 letter iso_a3 code and changing the 
+#associated hexidecimal color reference:
+##For each species
+## For each edatope
+##Produce output as three panel graphc B2-C4-D6
+Spp.list <- unique(bgc_freq$spp)
+#Spp.list <- Spp.list[!Spp.list %in% c("Pl", "Sx", "Cw", "Fd", "Bl", "Hw", "Hm", "Lw")]#,)"Fd"Cw", "Pl","Sx", "Qg", "Ra" 
+Spp.list <- c("Pyi", "Fdi", "Lw")
+#Spp.list = "Pyi"
+SuitCompare <- foreach(Spp = Spp.list, .combine = rbind)  %do% {options(stringsAsFactors = FALSE)
+  Spp_ESuit <- bgc_freq[(bgc_freq$spp %in% Spp), ]
+  #foreach(eda = EdaUse, .combine = rbind) %do%{
+    #Spp_ESuitEda <- Spp_ESuit [(Spp_ESuit$use %in% eda), ]
+    # BGC_col2 <- BGC_col %>% left_join(., Spp_ESuitEda, by = "bgc") %>% distinct()
+    # BGC_col2$mycolors[BGC_col2$ESuit == "1"] <- "#33a02c"
+    # BGC_col2$mycolors[BGC_col2$ESuit == "2"] <- "#faea05"
+    # BGC_col2$mycolors[BGC_col2$ESuit == "3"] <- "#ff7f00"
+    # WNA_BGC$color <- BGC_col2$mycolors
+    
+    WNA_BGC_sf <- st_as_sf(WNA_BGC)
+    WNA_BGC_sf <- WNA_BGC_sf %>% 
+      left_join(Spp_ESuit)
+    outfile <- paste0 ("./maps/", Spp, "_frequency_map", ".gpkg")
+     outfile_sf <- paste0 ("./maps/", Spp, "_sf_", eda, ".gpkg")
+    #shapefile(WNA_BGC,  outfile, overwrite = TRUE)
+    st_write(WNA_BGC_sf, outfile, append = TRUE)
+  }
+
+```
+
+
+```{r generate QML}
+
+base = newXMLNode("qgis")
+addAttributes(base,
+              labelsEnabled="0",
+              simplifyDrawingTol="1",
+              simplifyAlgorithm="0",
+              readOnly="0",
+              minScale="1e+08",
+              simplifyMaxScale="1",
+              version="0.0.1",
+              styleCategories="AllStyleCategories",
+              simplifyLocal="1",
+              simplifyDrawingHints="1",
+              hasScaleBasedVisibilityFlag="0",
+              maxScale="0")
+flags <- newXMLNode("flags")
+identifiable <- newXMLNode("Identifiable", 1)
+removable <- newXMLNode("Removable", 1)
+searchable <- newXMLNode("Searchable", 1)
+
+renderer_v2 <- newXMLNode("renderer-v2")
+addAttributes(renderer_v2,
+              type="categorizedSymbol",
+              attr="BGC",
+              forceraster="0",
+              enableOrderBy="0",
+              symbollevels="0")
+
+categories <- newXMLNode("categories")
+category <- lapply(seq(WNA_BGC_sf$BGC),function(val){newXMLNode("category", attrs = c(
+  value = WNA_BGC_sf$BGC[val],
+  label = WNA_BGC_sf$BGC[val],
+  render = "true",
+  symbol = as.character(val -1)))
+})
+
+symbols <- newXMLNode("symbols")
+symbol <- lapply(seq(WNA_BGC_sf$BGC),function(val){newXMLNode("symbol", attrs = c(
+  type="fill",
+  alpha="1",
+  name=as.character(val -1),
+  force_rhr="0",
+  clip_to_extent="1"), newXMLNode("layer", attrs = c(
+    class="SimpleFill",
+    enabled="1",
+    pass="0",
+    locked="0"
+  ), newXMLNode("prop", attrs = c(
+    k="border_width_map_unit_scale",
+    v="3x:0,0,0,0,0,0"
+  )), newXMLNode("prop", attrs = c(
+    k="color",
+    v=WNA_BGC_sf$color[val]
+  )), newXMLNode("prop", attrs = c(
+    k="joinstyle",
+    v="bevel"
+  )), newXMLNode("prop", attrs = c(
+    k="offset",
+    v="0,0"
+  )), newXMLNode("prop", attrs = c(
+    k="offset_map_unit_scale",
+    v="3x:0,0,0,0,0,0"
+  )), newXMLNode("prop", attrs = c(
+    k="offset_unit",
+    v="MM"
+  )), newXMLNode("prop", attrs = c(
+    k="outline_color",
+    v="35,35,35,255"
+  )), newXMLNode("prop", attrs = c(
+    k="outline_style",
+    v="solid"
+  )), newXMLNode("prop", attrs = c(
+    k="outline_width",
+    v="0.26"
+  )), newXMLNode("prop", attrs = c(
+    k="outline_width_unit",
+    v="MM"
+  )), newXMLNode("prop", attrs = c(
+    k="style",
+    v="solid"
+  )), newXMLNode(
+    "data_defined_properties",
+    newXMLNode(
+      "Option", attrs = c(
+        type="Map"), newXMLNode(
+          "Option", attrs = c(
+            value="",
+            type="QString",
+            name="name"
+          )
+        ), newXMLNode(
+          "Option", attrs = c(
+            name="properties"
+          )
+        ), newXMLNode(
+          "Option", attrs = c(
+            value="collection",
+            type="QString",
+            name="name"
+          )
+        )))))
+  
+})
+
+
+addChildren(base, list(flags,
+                       renderer_v2))
+
+
+addChildren(flags, list(identifiable,
+                        removable,
+                        searchable))
+addChildren(renderer_v2, list(categories,
+                              symbols))
+addChildren(categories, category)
+addChildren(symbols, symbol)
+
+writeLines(saveXML(base), "./example.qml")
+
+```
+

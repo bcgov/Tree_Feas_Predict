@@ -1,0 +1,486 @@
+---
+title: "TreeSpeciesRanking"
+author: "William H MacKenzie"
+date: "02/10/2019"
+output: html_document
+---
+
+# Tree Species Environmental Suitability  - March 16, 2019
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require (RGtk2)
+require(plyr)
+require (rChoiceDialogs)
+require (data.table)
+require(doBy)
+require (utils)
+require(labdsv)
+require(tools )
+require(svDialogs)
+require(tcltk)
+require(randomForest)
+require(foreach)
+require(dplyr)
+require(reshape2)
+require(reshape)
+require(doParallel)
+require(caret)
+require(C50)
+require (stringr)
+require(UBL)
+require(dostats)
+require(ordinalForest)
+require(tidyverse)
+require(ggplot2)
+require (RGtk2)
+
+require (rgdal)
+require(mapview)
+require(sf)
+require(tmap)
+require(tidyverse)
+require(rmapshaper)
+require(rgeos)
+require(raster)
+require(devtools)
+#require(cleangeo)
+
+options(stringsAsFactors = FALSE)
+## set up some folder location variables
+outputs <- ("./outputs/") # location of model outputs 
+inputs <- ("./inputs/") 
+DB_share <- ("C:/Users/whmacken/Dropbox (WorkingFiles_Telus)/Suitability Review/")
+common <- ("D:/CommonTables/TreeFeasibility/")
+```
+
+## Import working Esuitability ratings table
+
+Table contains all site units for western north america.
+```{r import working Esuitability, include=FALSE}
+
+ESuit <- fread(paste0(common, "./Feasibility_v11_22.csv"), data.table = FALSE)
+WNA_BGC <- fread ("D:/CommonTables/BECdb/All_BGCs_v11_20.csv", data.table = FALSE)
+BC_BGC <- WNA_BGC %>% filter(DataSet == "BC") %>% dplyr::select(Map_Label) %>% dplyr::rename("BGC" = Map_Label)
+ESuit <- left_join(BC_BGC, ESuit)
+# #ESuit$ESuit <- paste ("E", ESuit$ESuit, sep = "")
+# #ESuit <- ESuit[!(ESuit$ESuit == "E5"),]
+ ESuit <- ESuit %>% dplyr::select(BGC, SS_NoSpace, Spp, SppVar, Feasible) %>% distinct()
+ 
+ BECv12 <- fread(paste0(inputs, "./BECv12_newunits.csv"), data.table = FALSE)
+ 
+ BECv12 <- left_join(BECv12, ESuit)
+ write.csv (BECv12 , paste0 (outputs,"BECv12_newunitFeasibility.csv"), row.names = FALSE )
+```
+
+
+## Merge in Reference Guide ratings and footnootes for comparison
+
+```{r import reference guide}
+RefGuide <- fread ("D:/CommonTables/ReferenceGuide/ReferenceGuide2019Complete_update2.csv",stringsAsFactors=FALSE)
+RefGuide <- RefGuide %>% dplyr::select(Region,ZoneSubzone,SS_NoSpace, Species, Suitability, Standard, FN1, FN2, FN3, FN4, FN5, FN6) %>% dplyr::rename(BGC = ZoneSubzone, Spp = Species)
+   #RefGuide <- drop_na(RefGuide)
+### limit refguide to only those units listed in the BECdb
+    BECdb <- fread ("D:/CommonTables/BECdb/WNA_SSeries_v11_20.csv", stringsAsFactors=FALSE)
+    BECdb <- drop_na(BECdb)
+###read in accepted units BECv11
+RefGuide <- RefGuide[RefGuide$SS_NoSpace %in% BECdb$SS_NoSpace,]
+### remove the climate change Standards entries
+RefGuide <- RefGuide %>% dplyr::filter(!grepl('CC', Standard))
+##update species codes in Ref guide
+RefGuide$SppVar <- RefGuide$Spp 
+RefGuide$Spp <- RefGuide$Spp %>% dplyr::recode("Se" = "Sx", "Sw" = "Sx", "Sxw" = "Sx", "Pli" = "Pl", "Plc" = "Pl", "Fdc" = "Fd", "Fdi" = "Fd", "Acb" = "Ac", "Act" = "Ac", "Pyc" = "Py", "Pyi" = "Py")
+#RefGuide <- RefGuide[,c(2:4,9:15)]
+#RefCombine <- RefGuide[,c(1:3)]
+FullSuitCompare <- left_join(ESuit, RefGuide, by.x= c("BGC","SS_NoSpace", "Spp"), by.y = c("BGC","SS_NoSpace", "Spp"), all = TRUE) ##usually set to TRUE
+#FullSuitCompare <- FullSuitCompare[(FullSuitCompare$Region == "Nelson") | (FullSuitCompare$Region == "LMH71") | (FullSuitCompare$Region == "LMH702016"), ]
+FullSuitCompare <-  FullSuitCompare  %>% distinct()
+
+###This section simply write a comparison between the reference guide and a table of new ESUITs for review
+FullSuitCompare2 <- FullSuitCompare
+FullSuitCompare2$Feasible_Ref_same <- FullSuitCompare2$Feasible == FullSuitCompare2$Suitability
+
+colnames(FullSuitCompare2)
+data = FullSuitCompare2 %>% dplyr::select(Region, BGC, SS_NoSpace, Standard, Spp, SppVar, Suitability, Feasible, Feasible_Ref_same, FN1, FN2, FN3, FN4, FN5, FN6, everything())
+#data <- data[!(data$Region == "NA"),]
+write.csv (data, paste0 (outputs,"ReferenceGuide&ESuit2.csv"), row.names = FALSE )
+```
+########Bring in Footnote Lookup table
+add restriction type variables
+```{r footnote type}
+footnotes <- fread ("./inputs/FootnoteType.csv")
+refguide_footnotes <- data %>% dplyr::select (FN1, FN2, FN3, FN4, FN5, FN6) #as.data.frame (FullSuitCompare[, 19:23])
+### converts footnote numbers into a series of footnote types
+for ( j in colnames(refguide_footnotes)) { # need to check if these columns align to Footnote columns
+for(i in 1: nrow(footnotes)){
+  c <- as.integer(footnotes[i,1])
+  d <- as.character (footnotes[i,2])
+  data [[j]] [data [[j]] == c] <- d
+  }
+}
+data$cold_limit <- apply(data == "cold", 1, any)
+data$heat_limit <- apply(data == "heat", 1, any)
+data$drought_limit <- apply(data == "drought", 1, any)
+data$wet_limit <- apply(data == "wet", 1, any)
+data$geographic_limit <- apply(data == "geographic", 1, any)
+data$trial_spp <- apply(data == "trial", 1, any)
+data <- data %>% dplyr::select(-FN1, -FN2, -FN3, -FN4, -FN5, -FN6)
+
+FullSuitCompare <- merge (data, refguide_footnotes, by = 0) # add back in the original FN numbers
+#ESuit <- rbind (ESuit, ESuit4) ### use where combining multiple suitability sheets
+FullSuit.list <- unique(FullSuitCompare$Unit)
+
+write.csv (FullSuitCompare, paste0 (outputs,"CFRG_Feasibility_w_Footnotes.csv"), row.names = FALSE )
+```
+
+
+## Generate site level CMD from climate surface derived data
+LHC_training set is generated from ##### script
+```{r import climate}
+X1 <- fread("./InputData/WNA_4k_HexPts_BGC_Normal_1961_1990MSY.csv", data.table = FALSE, stringsAsFactors=FALSE)
+colnames (X1)[2] <- "BGC"
+X1 <- X1[-1]
+# ####Prepare additional variables
+X1$PPT_MJ <- X1$PPT05 + X1$PPT06 # MaY/June precip
+X1$PPT_JAS <- X1$PPT07 + X1$PPT08 + X1$PPT09 # July/Aug/Sept precip
+X1$PPT.dormant <- X1$PPT_at + X1$PPT_wt # for calculating spring deficit
+X1$CMD.def <- 500 - (X1$PPT.dormant)# start of growing season deficit original value was 400 but 500 seems better
+X1$CMD.def [X1$CMD.def < 0] <- 0 #negative values set to zero = no deficit
+X1$CMD.grow <- X1$CMD05 + X1$CMD06 +X1$CMD07 +X1$CMD08 +X1$CMD09
+X1$DD5.grow <- X1$DD5_05 + X1$DD5_06 + X1$DD5_07 + X1$DD5_08 + X1$DD5_09
+X1$CMD.total <- X1$CMD.def + X1$CMD
+X1$CMDMax <- X1$CMD07 # add in so not removed below
+X1$DDgood <- X1$DD5 - X1$DD18
+X1$DDnew <- (X1$DD5_05 + X1$DD5_06 +X1$DD5_07  + X1$DD5_08)  - (X1$DD18_05 + X1$DD18_06 +X1$DD18_07 +X1$DD18_08)
+X1$TmaxJuly <- X1$Tmax07
+#
+
+VarList = c("bFFP","CMD.total","DD5","EMT", "EXT","FFP","MSP","Eref","Tave07","PAS","Tmin_wt","CMDMax")
+
+X1 <- X1 %>% dplyr::select(BGC, VarList)
+# modelvars <- read.csv (as.character("./outputs/Final23Var_WNABGCv11.csv"))
+# modelvars <- as.character(modelvars$x)
+
+
+CMD <- aggregate( CMD.total ~ BGC, X1, mean) ##
+meanVar <-aggregate( . ~ BGC, X1, mean)
+SS_Var <- merge(ESuit, meanVar, by = "BGC")
+SS_Var$Spp [is.na(SS_Var$Spp)] <- "X" ### where no treespecies suitable create a no-species code 'X'
+
+###_____________________________________________####
+
+###for each wetter rSMR, previous CMD is divided by 2
+# for (i in 1:3){
+#   CMD[,2+i] <- CMD[,1+i]/2
+# }
+# colnames(CMD) <- c("BGC","4","5","6","7")
+# CMD <- CMD[,c(1,3:5,2)]
+#
+# ###for each drier rSMR, previous CMD + 100
+# for (i in 1:4){
+#   CMD[,length(CMD)+1] <- CMD[,length(CMD)] + 100
+# }
+# colnames(CMD)[6:9] <- c("3","2","1","0")
+#
+# CMD <- CMD[,order(colnames(CMD))]## creates full grid of CMD values by BGC by rSMR class
+#
+# CMD.list <- melt(CMD)
+#  #######needs to get rid of blank BGC
+# CMD.list$EDA <- paste (CMD.list$BGC, "_", CMD.list$variable)
+# CMD.list <- CMD.list[,-c(1:2)]
+```
+
+
+## Import edatopic and aSMR tables
+
+Merge all climate and edatopic variables with suitability ratings
+
+```{r import edaphic}
+
+E1 <- fread (paste0("./inputs/Edatopic_v11_22.csv"),stringsAsFactors=FALSE , na.strings= c("", "NA"))
+# 
+# #E2 <- E1 %>% distinct()
+# #write.csv (E2, "Edatopic_v11.2.csv")
+# #E1 <- E1[,-c(5)]
+# #E1 <- E1 [is.na (E1$Codes),]### removes site series flagged with special condition
+# E1 <- unique(E1)
+# Codes <- unique (E1[,c(3,6)]) ## identify special ecosystems
+# colnames (Codes) [1] <- "Unit"
+# 
+# E1$SNR <-str_sub(E1$Edatopic, 1,1)
+# E1$rSMR <-str_sub(E1$Edatopic, -1,-1)
+# E1$EDA <- paste (E1$MergedBGC, "_", E1$rSMR)
+# E1_sub <- E1 [E1$EDA %in% CMD.list$EDA,]
+# E1_sub <- merge (E1_sub, CMD.list, by = "EDA")
+# names(E1_sub) [10] <- "EdaCMD"
+# E1_sub$EdaCMD <- as.numeric(E1_sub$EdaCMD)
+# E2 <- E1_sub
+# #E1_sub$SNR <- as.factor(E1_sub$SNR)
+# E1_sub$SNR_num <- E1_sub$SNR%>% str_replace_all(c("A" = "1", "B" = "2", "C" = "3", "D" = "4" ,"E" = "5" ))
+# E1_sub$SNR_num <- as.numeric(E1_sub$SNR_num)
+# 
+#  
+# aSMRrSMR = "./inputs/modelled_ALLv11_rSMR_aSMR_grid_HalfStep.csv"
+# aSMR <- fread(aSMRrSMR,stringsAsFactors=FALSE,na.strings=".")
+# aSMR <- aSMR[,-1]
+# colnames(aSMR) <- c("BGC","0","1","2","3","4","5","6","7")
+# aSMR.list <- melt(aSMR)
+# aSMR.list$EDA <- paste (aSMR.list$BGC, "_", aSMR.list$variable)
+# aSMR.list <- aSMR.list [,-c(1:2)]
+# E1_sub <- merge (E1_sub, aSMR.list, by = "EDA")
+# colnames (E1_sub)[12] <- "aSMR"
+# E1_sub <- E1_sub [, c("SS_NoSpace", "EdaCMD", "SNR_num", "aSMR")]#
+# E1_sub <- E1_sub %>% distinct()
+# E1_sub$SS_NoSpace <- as.character(E1_sub$SS_NoSpace)
+# SS_data <- E1_sub[,-1] %>% group_by(E1_sub$SS_NoSpace) %>% summarise_all(list(~min(.),~mean(.),~max(.), ~sd(.)))###ignore warning
+# #SS_data <- SS_data [-2]
+# colnames(SS_data)[1] <- "SS_NoSpace"
+# SS_test <- merge (SS_Var, SS_data, by = "SS_NoSpace")
+# difs <- setdiff(SS_Var$SS_NoSpace,SS_data$SS_NoSpace) ### look for units no matching between 2 tables
+# difs
+# #difs2 <- setdiff(SS_data$Unit,SS_Var$Unit)
+# #difs2
+# SS_test <- SS_test[!is.na(SS_test$Spp),]
+# SS_test$ES_RG_same <- SS_test$ESuit == SS_test$RefSuit
+# data = SS_test %>% select(Region, BGC, Unit, Spp, ESuit, RefSuit, ES_RG_same,
+#                           cold_limit, heat_limit,drought_limit,wet_limit, geographic_limit, 
+#                           FN1, FN2, FN3, FN4, FN5,
+#                          EdaCMD_max, aSMR_min, aSMR_max, Tmin_sp,  bFFP, PAS)
+# data <- data %>% distinct()
+# write.csv (data, "./outputs/SS_Suit_for_Review.csv")
+```
+
+### Compare to  A Banners original ratings
+Limit to Esuit rating he provided.
+Add in flag variable to show where differs from current ratings
+
+``` {r merge with draft suitability ratings - ABanner}
+# 
+# AB_Suit <- fread("./inputs/TreeSppSuit_v10.10_AB.csv")
+# AB_Suit.list <- melt(AB_Suit)
+# colnames (AB_Suit.list) [2:3] <- c("Spp", "AB_suit")
+# AB_Suit.list <- AB_Suit.list %>% drop_na()
+# SS_test2 <- merge (SS_test, AB_Suit.list, by = c("Unit", "Spp"))
+# SS_test2$ES_AB_same <- SS_test2$ESuit == SS_test2$AB_suit
+# SS_test2$ES_RG_same <- SS_test2$ESuit == SS_test2$RefSuit
+# colnames(SS_test2)
+# data = SS_test2 %>% select(BGC, Unit, Spp, ESuit, AB_suit, ES_AB_same, RefSuit, ES_RG_same, 
+#                           cold_limit, heat_limit,drought_limit,wet_limit, geographic_limit,
+#                           FN1, FN2, FN3, FN4, FN5,
+#                          EdaCMD_max, aSMR_min, aSMR_max, Tmin_sp,  bFFP, PAS)
+# data <- data %>% distinct()
+# 
+# write.csv (data, "./outputs/ESuit_review_AB.csv")
+```
+
+
+
+
+## Estimated relative site index (by site condition)
+
+Need input table of relative site index by aSMR x SNR
+Add the SI % value to each edatopic position in E1 for each species
+Turn into actual Site Index Values by multiplying by GDD based factor
+Summarize by site series (mean plus SD)
+
+
+``` {r estimated site index}
+# rSI <- fread ("./inputs/rSI_by_Edatope.csv") # this is a heuristic approximation of relative site index on a absolute grid
+# <<<<<<< HEAD
+# rSI$aEdatopic <- paste0(rSI$SNR, rSI$aSMR)
+# rSI <- as.data.frame (rSI)
+# DD5 <- fread ("./inputs/DD5_BGC.csv") # growing degree days by BGC
+# E2_sub <- merge (E2, aSMR.list, by = "EDA")
+# colnames (E2_sub)[11] <- "aSMR"
+# E2_sub$aEdatopic  <- paste0(E2_sub$SNR, E2_sub$aSMR)
+# setnames(E2_sub, "MergedBGC", "BGC")
+# # add in DD5 values by BGC
+# E2_sub <- left_join(E2_sub, DD5, by = "BGC")
+# 
+# spps <- unique(rSI$Spp)
+# BGCs <- unique (E2_sub$MergedBGC)
+# #spp = "Fd"
+# ####need to change into a foreach and the rbind to get final table
+# for (spp in spps){
+#   SS.temp <- ESuit$Unit[ESuit$Spp == spp]
+#   Suit.temp <- E2_sub [E2_sub$SS_NoSpace %in% SS.temp,]
+#   rSI.temp <- rSI [,c(4:5)] [rSI$Spp %in% spp,]
+#   Suit.temp <- left_join(Suit.temp, rSI.temp, by = "aEdatopic")#  ### add in rSI values to each line
+#   Suit.temp$SI <- Suit.temp$rSI *(Suit.temp$DD5 * 0.022)  ### multiply rSI * formula to new variable to get SI
+#   ### Need to adjust for excessive heat limitations to growth
+#   Suit.temp <- Suit.temp %>% 
+#   select(BGC, SS_NoSpace, SI)
+#   SI.temp <- Suit.temp [-2] %>% group_by(Suit.temp$SS_NoSpace) %>% summarise ( SI_mean = mean(SI), SI_sd = sd(SI)) 
+#   SI.temp$Spp <- spp
+# 
+# }
+# 
+# 
+# # formula for SI = rSI * (DD5 *.022)relative SI into a SI50 value for Fd
+# 
+# DD5 <- fread ("./inputs/DD5_BGC.csv") # growing degree days by BGC
+# E2_sub <- merge (E2, aSMR.list, by = "EDA")
+# colnames (E2_sub)[11] <- "aSMR"
+# 
+# spps <- unique(rSI$Spp)
+# BGCs <- unique (E2_sub$MergedBGC)
+# spp = "Fd"
+# for (spp in spps){
+#   SS.temp <- ESuit$Unit[ESuit$Spp == spp]
+#   Suit.temp <- E2_sub [E2_sub$SS_NoSpace %in% SS.temp,]
+#   ### add in RSI values to each line
+#   ### multiply RSI * formula to new variable to get SI
+#   ###summarize SI by site series mean and sd
+#   
+#   
+#   
+#   for(edatope in edatopes){
+#     comm.ref <- get(paste("comm.ref", edatope, sep=""))
+#     comm.ref.spp <- comm.ref>0
+#     
+#     for(rcp in rcps){
+#       for(proj.year in proj.years){
+# 
+#         comm.proj <- as.data.frame(matrix(rep(NA, dim(points)[1]*length(spps)), dim(points)[1], length(spps)))
+#         for(spp in spps){
+#           Suit <- read.csv(paste("outputs/Suit", grid, GCM, rcp, proj.year, spp, edatope, "csv", sep="."))[,1]
+#           Suit[Suit==4] <- 5
+#           Suit <- 1-(Suit-1)/4
+#           comm.proj[,which(spps==spp)] <- Suit
+#         }    
+#     
+#     
+# 
+# 
+# E2_sub2 <- E2_sub2[E2_sub$MergedBGC %in% ESuit$Unit[ESuit$Spp == "Fd"]] <- rSI$rSI
+# E1_sub <- E1_sub [, c("SS_NoSpace", "EdaCMD", "SNR_num", "aSMR")]#
+# E1_sub <- E1_sub %>% distinct()
+# E1_sub$SS_NoSpace <- as.character(E1_sub$SS_NoSpace)
+# E2 <- merge(E1, )
+# SS_edatope <- 
+#Add the equivalent aSMR to rSI
+# formula for SI = rSI * (DD5 *.022)relative SI into a SI50 value
+
+```
+
+## Create edatopic grid review materials 
+
+On edatopic grid show species suitable by edatopic position
+Suitability rating
+Site Index
+aSMR
+
+```{r Edatopic Review}
+# SIdat <- fread("./inputs/BartPredSI.csv", data.table = F)
+# edaDat <- fread("./inputs/Edatopic_v11_7.csv", data.table = F)
+# edaDat <- edaDat[edaDat$Source %in% c("BECv10","BECv11"),c("MergedBGC", "SS_NoSpace","Edatopic")]
+# suitDat <- fread("./inputs/TreeSpp_ESuit_v11_18.csv", data.table = F)
+# suitDat <- suitDat[suitDat$Unit %in% unique(edaDat$SS_NoSpace),c("Unit","Spp","ESuit")]
+# SIdat <- SIdat[,-4]
+# 
+# dat <- merge(SIdat, suitDat, by = c("Unit","Spp"), all = T)
+# dat <- dat[!is.na(dat$SIPred),]
+# dat <- dat[!is.na(dat$ESuit) | dat$SIPred >= 20,]
+# dat$ESuit[is.na(dat$ESuit)] <- 5
+# colnames(edaDat) <- c("Subzone","Unit","Edatopic")
+# edaDat <- unique(edaDat)
+# dat <- merge(dat, edaDat, by = "Unit", all.x = T)
+# dat$SIPred <- round(dat$SIPred,1)
+# dat <- unique(dat)
+# dat <- dat[!is.na(dat$Edatopic),]
+# 
+# 
+# out <- foreach(BGC = unique(dat$Subzone), .combine = rbind) %do% {
+#   sub <- dat[dat$Subzone == BGC,]
+#   gridDat <- foreach(eda = unique(sub$Edatopic), .combine = rbind) %do% {
+#     sub2 <- sub[sub$Edatopic == eda,]
+#     temp <- aggregate(cbind(SIPred, ESuit) ~ Spp + Edatopic, sub2, FUN = mean) %>%
+#       mutate(SIPred = round(SIPred,1), ESuit = round(ESuit, 0))
+#     temp <- temp[order(-temp$SIPred),]
+#     temp$Spp <- paste(temp$Spp,temp$SIPred, sep = ":")
+#     if(any(temp$ESuit == 1)){
+#       dom <- paste(temp$Spp[temp$ESuit == 1], collapse = ",")
+#       dom <- paste("*",dom,"*\n", sep = "")
+#     }else{
+#       dom <- NULL
+#     }
+#     if(any(temp$ESuit == 2)){
+#       sec <- temp$Spp[temp$ESuit == 2]
+#       sec <- paste(sec, collapse = ",")
+#       sec <- paste(sec,"\n")
+#     }else{
+#       sec <- NULL
+#     }
+#     if(any(temp$ESuit == 3)){
+#       un <- temp$Spp[temp$ESuit == 3]
+#       un <- paste(un, collapse = ",")
+#       un <- paste("(",un,")\n", sep = "")
+#     }else{
+#       un <- NULL
+#     }
+#     if(any(temp$ESuit %in% c(4,5))){
+#       x <- temp$Spp[temp$ESuit %in% c(4,5)]
+#       x <- paste(x,",",sep = "")
+#       if(length(x) >= 2){
+#         j <- 0
+#         for(i in seq(2,length(x), by = 2)){x <- append(x,"\n", after = i+j);j <- j+1}
+#       }
+#       if(x[length(x)] == "\n"){x <- x[-length(x)]}
+#       x <- paste(x, collapse = "")
+#       x <- paste("[",x,"]", sep = "")
+#     }else{
+#       x <- NULL
+#     }
+#     lab <- paste(dom, sec,  un,x, sep = "")
+#     
+#     data.frame(Edatopic = eda, Label = lab)
+#   }
+#   gridDat$Alpha <- gsub("[[:digit:]]","",gridDat$Edatopic)
+#   gridDat$Numeric <- gsub("[[:upper:]]","",gridDat$Edatopic) %>% as.numeric()
+#   ##plot
+#   pdf(file = paste("./outputs/SIGrid_",BGC,".pdf",sep = ""), height = 10.5, paper = "letter")
+#   print(ggplot(data = gridDat)+
+#           geom_tile(aes(x= Alpha, y = Numeric), color = "black", fill = "white")+
+#           geom_text(aes(x = Alpha, y = Numeric, label = Label), size = 2.4)+
+#           scale_y_discrete(limits = c("8","7","6","5","4","3","2","1","0"))+
+#           scale_x_discrete(limits = c("A","B","C","D","E"))+
+#           labs(x = "Relative Soil Nutrient Regime", y = "Relative Soil Moisture Regime", cex = 1.5, title = BGC)+
+#           theme_bw(base_size = 10)+
+#           theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+#           coord_fixed())
+#   dev.off()
+#   gridDat
+# }
+
+
+## export spatial file suitability rating for review of CCISS paper 
+```
+
+```{r review maps}
+# SS_Use <- fread("D:/CommonTables/BECdb/SiteSeries_Use_CCISSpaper_24Mar2020.csv", data.table = FALSE)
+# SS_D6 <-SS_Use %>% filter(Use == "D6")
+# ###Compare to list of BGCs modelled
+# BGC_Use <- fread("D:/CommonTables/BECdb/All_BGCs_v11.csv")
+# compare <- anti_join(BGC_Use, SS_Use, by = c("Map_Label" = "BGC"))
+# compare2 <- anti_join(SS_Use, BGC_Use,  by = c("BGC" = "Map_Label" ))
+# # Edatopic <- fread("D:/CommonTables/BECdb/Edatopic_v11_20.csv")
+# # compare3 <- anti_join(BGC_Use, Edatopic, by = c("Map_Label" = "BGC"))
+# # Edatopic$num <- "1"
+# # Edawet <- Edatopic %>% filter(Edatopic %in% c("D6","D5","D7")) %>%
+# #     dplyr::select(SS_NoSpace,Edatopic, num) %>%
+# #     pivot_wider(names_from = Edatopic, values_from = num)
+# # Edawet1 <- Edawet[!(is.na(Edawet$D6)),]
+# # fwrite(Edawet1, "./outputs/wetsiteseries.csv")
+# 
+# SS.list <- as.list(SS_Use$SS_NoSpace)
+# #SS_C4 <- SS_Use[SS_Use$Use == "C4",]
+# #SS_Use$SS_NoSpace <-  as.character(SS_Use$SS_NoSpace)
+# CCISS_ESuit <- ESuit [ESuit$SS_NoSpace %in% SS.list,]
+# CCISS_ESuit <- CCISS_ESuit %>% dplyr::select(SS_NoSpace, Spp, ESuit) %>%
+#     full_join(.,SS_Use)%>%
+#     dplyr::select(-Source, -Edatopic) %>% dplyr::select(BGC, everything()) %>% 
+#     distinct()
+# fwrite(CCISS_ESuit, "./outputs/ESuit_CCISSPaper_full.csv")
+
+```

@@ -1,0 +1,147 @@
+---
+title: "TreeSpeciesRanking"
+author: "William H MacKenzie"
+date: "02/10/2019"
+output: html_document
+---
+
+# Tree Species Environmental Suitability  - March 16, 2019
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(XML)
+require (RGtk2)
+require(plyr)
+require (rChoiceDialogs)
+require (data.table)
+require(doBy)
+require (utils)
+require(labdsv)
+require(tools )
+require(svDialogs)
+require(tcltk)
+require(randomForest)
+require(foreach)
+require(dplyr)
+require(reshape2)
+require(reshape)
+require(doParallel)
+require(caret)
+require(C50)
+require (stringr)
+require(UBL)
+require(dostats)
+require(ordinalForest)
+require(tidyverse)
+require(ggplot2)
+require (RGtk2)
+require(janitor)
+require (rgdal)
+require(mapview)
+require(sf)
+require(tmap)
+require(tidyverse)
+require(rmapshaper)
+require(rgeos)
+require(raster)
+require(devtools)
+#require(cleangeo)
+
+rm(list = ls(all.names = TRUE)) # clears all environment objects including hidden objects
+
+options(stringsAsFactors = FALSE)
+## set up some folder location variables
+outputs <- ("./outputs/") # location of model outputs 
+inputs <- ("./inputs/") 
+DB_share <- ("C:/Users/whmacken/Dropbox (WorkingFiles_Telus)/Suitability Review/")
+DB_share2 <- ("C:/Users/whmacken/Dropbox (WorkingFiles_Telus)/CCISS paper/Inputdata/")
+```
+
+#BGC map themed to species suitability
+
+```{r species suitability maps}
+
+ #WNA_BGC <- readOGR("D:/CommonTables/BGC_Maps/WNA_BGC_v11_31Dec2019.shp")# must be dissolved
+WNA_BGC <- readOGR("./inputs/WNA_dissolved_v1.gpkg") %>% clean_names()# for dev use
+#BGC_simple <- rmapshaper::ms_simplify(WNA_BGC, keep = 0.01) 
+#CCISS_ESuit2 <- fread("./outputs/ESuit_CCISSPaper_new.csv", data.table = FALSE) ## this file is being updated adhoc - to be merged back into the master suitability list
+CCISS_ESuit <- fread("./inputs/Feasibility_v12_13_w_OHR.csv", data.table = FALSE)# %>% filter(!OHR == "OHR")
+edatopic <- fread("./inputs/Edatopic_v12_12.csv", data.table = FALSE) %>% clean_names()
+##estimate frequency by BGC
+source("./_functions/SppFrequencyCalc.R")
+bgc_freq <- frequency_bgc(CCISS_ESuit, edatopic) %>% mutate(spp = sppsplit)
+
+# SS_use <- fread("./inputs/SiteSeries_Use_CCISSpaper_24Mar2020.csv", data.table = FALSE) %>% clean_names() %>% mutate(ss_nospace = ss_no_space)
+# CCISS_ESuit2 <- left_join(SS_use, CCISS_ESuit)
+#Create a dataframe with all a column containing country ID and another with an assigned color:
+# BGC_col <- data.frame(
+#   BGC = WNA_BGC$bgc,
+#   mycolors = c(rep("#e5e5e5",367)), #Assign the same color to all regions initilally. Number of merged BGCs required
+#   stringsAsFactors = FALSE
+# ) %>% clean_names()
+
+#Highlight some selected regions by looking up the 3 letter iso_a3 code and changing the 
+#associated hexidecimal color reference:
+##For each species
+## For each edatope
+##Produce output as three panel graphc B2-C4-D6
+Spp.list <- unique(bgc_freq$spp)
+#Spp.list <- Spp.list[!Spp.list %in% c("Pl", "Sx", "Cw", "Fd", "Bl", "Hw", "Hm", "Lw")]#,)"Fd"Cw", "Pl","Sx", "Qg", "Ra" 
+Spp.list <- c("Pyi", "Fdi", "Lw", "Pw", "Cw")
+#Spp.list = "Cw"
+SuitCompare <- foreach(Spp = Spp.list, .combine = rbind)  %do% {options(stringsAsFactors = FALSE)
+  Spp_ESuit <- bgc_freq[(bgc_freq$spp %in% Spp), ]
+  #foreach(eda = EdaUse, .combine = rbind) %do%{
+    #Spp_ESuitEda <- Spp_ESuit [(Spp_ESuit$use %in% eda), ]
+    # BGC_col2 <- BGC_col %>% left_join(., Spp_ESuitEda, by = "bgc") %>% distinct()
+    # BGC_col2$mycolors[BGC_col2$ESuit == "1"] <- "#33a02c"
+    # BGC_col2$mycolors[BGC_col2$ESuit == "2"] <- "#faea05"
+    # BGC_col2$mycolors[BGC_col2$ESuit == "3"] <- "#ff7f00"
+    # WNA_BGC$color <- BGC_col2$mycolors
+    
+    WNA_BGC_sf <- st_as_sf(WNA_BGC)
+    WNA_BGC_sf <- WNA_BGC_sf %>% 
+      left_join(Spp_ESuit)
+    outfile <- paste0 ("./maps/", Spp, "_frequency_map", ".gpkg")
+    # outfile_sf <- paste0 ("./maps/", Spp, "_sf_", eda, ".gpkg")
+    #shapefile(WNA_BGC,  outfile, overwrite = TRUE)
+    st_write(WNA_BGC_sf, outfile, append = FALSE)
+  }
+
+```
+```{r expand range}
+WNA_BGC <- readOGR("./inputs/WNA_dissolved_v1.gpkg") %>% clean_names()#
+CCISS_ESuit <- fread("./inputs/Feasibility_v12_13_w_OHR.csv", data.table = FALSE)# %>% filter(!OHR == "OHR")
+# bgcs_interest <- c("ICHmc2", "ICHmc1", "ICHwc", "ICHvc", "ICHmm", "ICHvk2", "ICHwk3", "ICHwk4","ESSFmc", "ESSFwv", "ESSFwk1", "ESSFmv3", "ESSFmm1") 
+# sbs <- CCISS_ESuit %>% filter(str_detect(bgc,"SBS")) %>% dplyr::select(bgc) %>%  distinct
+# sbps <- CCISS_ESuit %>% filter(str_detect(bgc,"SBPS"))  %>% dplyr::select(bgc) %>%  distinct
+# other <- CCISS_ESuit %>% filter(bgc %in% bgcs_interest)  %>% dplyr::select(bgc) %>%  distinct
+# bgcs.interest <- rbind(sbs, sbps, other)
+#fwrite(bgcs.interest, "./outputs/NA_BGCS.csv")
+bgcs.interest1 <- fread("./outputs/NA_BGCS.csv") %>% pivot_longer(-bgc, names_to = "spp")
+#bgcs.interest.list <- bgcs.interest$bgc
+
+Spp.list <- c("Pyi", "Fdi", "Lw", "Pw", "Cw")
+## add in table type by BGC with type of data
+Spp = "Fdi"
+SuitCompare <- foreach(Spp = Spp.list, .combine = rbind)  %do% {options(stringsAsFactors = FALSE)
+  Spp_ESuit <- bgc_freq[(bgc_freq$spp %in% Spp), ]
+bgcs.interest2 <- bgcs.interest1[(bgcs.interest1$spp %in% Spp), ]
+    
+    WNA_BGC_sf<- st_as_sf(WNA_BGC)
+    WNA_BGC_sf <- WNA_BGC_sf %>% 
+      left_join(Spp_ESuit) %>% mutate(spp = Spp) %>% left_join(bgcs.interest2)%>% mutate(Freq = ifelse(is.na(Freq) & value == "g", "feasible",
+                                             ifelse(is.na(Freq) & value == "n", "unknown", Freq)))
+    outfile <- paste0 ("./maps/", Spp, "_expand_map", ".gpkg")
+     #outfile_sf <- paste0 ("./maps/", Spp, "_sf_", eda, ".gpkg")
+    #shapefile(WNA_BGC,  outfile, overwrite = TRUE)
+    st_write(WNA_BGC_sf, outfile, append = TRUE)
+  }
+ #xx <- as.data.frame(WNA_BGC_sf)
+```
+
+
+
+
+

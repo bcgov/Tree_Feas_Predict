@@ -1,0 +1,71 @@
+Lifeform,TreeCode,ScientificName,EnglishName,US code,Code,Native,Include
+1,Ba,Abies amabilis,amabilis fir,ABAM,ABIEAMA,N,y
+1,Bg,Abies grandis,grand fir,ABGR,ABIEGRA,N,y
+1,Bl,Abies lasiocarpa,subalpine fir,ABLA,ABIELAS,N,y
+1,Cw,Thuja plicata,western redcedar,THPL,THUJPLI,N,y
+1,Fd,Pseudotsuga menziesii,Douglas-fir,PSME,PSEUMEN,N,y
+1,Fdc,Pseudotsuga menziesii var. menziesii,coast Douglas-fir,,PSEUMEN2,N,y
+1,Fdi,Pseudotsuga menziesii var. glauca,Rocky Mountain Douglas-fir,,PSEUMEN1,N,y
+1,Hm,Tsuga mertensiana,mountain hemlock,TSME,TSUGMER,N,y
+1,Hw,Tsuga heterophylla,western hemlock,TSHE,TSUGHET,N,y
+1,Jr,Juniperus scopulorum,Rocky Mountain juniper,JUSC2,JUNISCO,N,y
+1,La,Larix lyallii,subalpine larch,LALY,LARILYA,N,y
+1,Lt,Larix laricina,tamarack,,LARILAR,N,y
+1,Lw,Larix occidentalis,western larch,LAOC,LARIOCC,N,y
+1,Pa,Pinus albicaulis,whitebark pine,PIAL,PINUALB,N,y
+1,Pf,Pinus flexilis,limber pine,PIFL2,PINUFLE,N,y
+1,Pj,Pinus banksiana,jack pine,,PINUBAN,N,y
+1,Pl,Pinus contorta,lodgepole pine,PICO,PINUCON,N,y
+1,Plc,Pinus contorta var. contorta,shore pine,,PINUCON1,N,y
+1,Pli,Pinus contorta var. latifolia,lodgepole pine,,PINUCON2,N,y
+1,Pw,Pinus monticola,western white pine,PIMO3,PINUMON,N,y
+1,Py,Pinus ponderosa,ponderosa pine,PIPO,PINUPON,N,y
+1,Sb,Picea mariana,black spruce,,PICEMAR,N,y
+1,Se,Picea engelmannii,Engelmann spruce,PIEN,PICEENG,N,y
+1,Ss,Picea sitchensis,Sitka spruce,PISI,PICESIT,N,y
+1,Sw,Picea glauca,white spruce,,PICEGLA,N,y
+1,Sx,Picea engelmannii x glauca,interior spruce,,PICEENE,N,y
+1,Sxs,Picea x lutzii,hybrid Sitka spruce,,PICEXLU,N,y
+1,Tw,Taxus brevifolia,western yew,,TAXUBRE,N,y
+1,Yc,Chamaecyparis nootkatensis,yellow-cedar,CHNO,CHAMNOO,N,y
+2,Acb,Populus balsamifera,balsam poplar,,POPUBAL,N,y
+2,Act,Populus trichocarpa,black cottonwood,POBAT,POPUTRI,N,y
+2,At,Populus tremuloides,trembling aspen,POTR5,POPUTRE,N,y
+2,Dr,Alnus rubra,red alder,ALRU2,ALNURUB,N,y
+2,Ea,Betula neoalaskana,Alaska paper birch,,BETUNEO,N,y
+2,Ep,Betula papyrifera,common paper birch,BEPA,BETUPAP,N,y
+2,Gp,Cornus nuttallii,western flowering dogwood,CONU4,CORNNUT,N,y
+2,Mb,Acer macrophyllum,bigleaf maple,ACMA3,ACERMAC,N,y
+2,Qg,Quercus garryana,Garry oak,QUGA4,QUERGAR,N,y
+2,Ra,Arbutus menziesii,arbutus,ARME,ARBUMEN,N,y
+1,Bb,Abies balsamea,balsam fir,,ABIEBAL,WNA,y
+1,Bc,Abies concolor,white fir,ABCO,ABIECON,WNA,y
+1,Bla,Abies lasiocarpa var. arizonica,corkbark fir,ABLAA,ABIELAS?????????,WNA,y
+1,Bm,Abies magnifica var. shastensis,Shasta red fir,ABSH,ABIEMAG1,WNA,y
+1,Bp,Abies procera,noble fir,ABPR,ABIEPRO,WNA,y
+1,Jw,Juniperus occidentalis,western juniper,JUOC,JUNIOCC,WNA,y
+1,Oa,Calocedrus (Libocedrus) decurrens,incense-cedar,CADE27,CALODEC,WNA,y
+1,Ob,Sequoiadendron giganteum,giant sequoia,,SEQUGIG,WNA,y
+1,Oc,Sequoia sempervirens,coast redwood,SESE3,SEQUSEM,WNA,y
+1,Pb,Pinus aristida,bristlecone pine,PIAR,PINUARI,WNA,y
+1,Pc,Pinus sabiniana,California foothill pine,PISA2,,WNA,y
+1,Pe,Pinus edulis,twoneedle pinyon,PIED,PINUEDU,WNA,y
+1,Pg,Pinus longaeva,Great Basin bristlecone pine,PILO,,WNA,y
+1,Pm,Pinus radiata,Monterey pine,,PINURAD,WNA,y
+1,Pn,Pinus monophylla,singleleaf pinyon,PIMO,PINUMON,WNA,y
+1,Ps,Pinus lambertiana,sugar pine,PILA,PINULAM,WNA,y
+1,Pz,Pinus jeffreyi,Jeffrey's pine,PIJE,,WNA,y
+1,Sp,Picea pungens,blue spruce,PIPU,PICEPUN,WNA,y
+1,Yp,Chamaecyparis lawsoniana,Port Orford-cedar,CHLA,CHAMLAW,WNA,y
+2,Aa,Populus angustifolia,narrowleaf cottonwood,POAN3,POPUANG,WNA,y
+2,Ad,Populus deltoides,eastern cottonwood,,POPUDEL,WNA,y
+2,Adm,Populus deltoides ssp. monilifera,plains cottonwood,PODEM,,WNA,y
+2,Add,Populus deltoides ssp. deltoides,eastern cottonwood,,,WNA,y
+2,Af,Populus freemontii,Fremont cottonwood,POFR2,,WNA,y
+2,Mt,Acer grandidentatum,bigtooth maple,ACGR3,,WNA,y
+2,Og,Fraxinus latifolia,Oregon ash,FRLA,FRAXLAT,WNA,y
+2,Ot,Lithocarpus densiflorus,tanoak,LIDE3,LITHDEN,WNA,y
+2,Oy,Chrysolepis chrysophylla,giant chinkapin,CHCH4,CHRYCHR,WNA,y
+2,Oz,Platanus racemosa,western sycamore,,,WNA,y
+2,Qb,Quercus kelloggii,black oak,QUKE,QUERKEL,WNA,y
+2,Qc,Quercus chrysolepis,canyon live oak,QUCH2,QUERCHR,WNA,y

@@ -1,0 +1,420 @@
+---
+title: "Species_Feasibility_Review"
+author: "Kiri Daust/Will MacKenzie"
+date: "15/05/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#### Fit distribution curves of tree species to climate variable based on BEC plot data
+#### Kiri Daust May 2020
+
+library(data.table)
+library(tidyverse)
+#library(sf)
+library(raster)
+library(ggstance) ##need this for boxplot
+library(foreach)
+library(weights)
+library(minpack.lm) ##this nls algorithm is better
+library(sn)
+library(ggthemes)
+library(gridExtra)
+library(Rcpp)
+require(stats)
+require(HistogramTools)
+
+#setwd("D:/GitHub/TreeSuitabilityPrediction/")
+
+
+aspectCalc1 <- function(lat, slope, aspect){##eqn 1 from McCune 2007
+  lat <- lat*pi/180
+  slope <- slope*pi/180
+  aspect <- aspect*pi/180
+  HL <- abs(pi - abs(aspect - (5*pi)/4))
+  res <- -1.467+1.582*cos(lat)*cos(slope)-1.5*cos(HL)*sin(slope)*sin(lat)-0.262*sin(lat)*sin(slope)+0.607*sin(HL)*sin(slope)
+  return(exp(res))
+}
+
+aspectCalc2 <- function(lat, slope, aspect){##eqn 2 from McCune 2007
+  lat <- lat*pi/180
+  slope <- slope*pi/180
+  aspect <- aspect*pi/180
+  HL <- abs(pi - abs(aspect - (5*pi)/4))
+  res <- -1.236+1.35*cos(lat)*cos(slope)-1.376*cos(HL)*sin(slope)*sin(lat)-0.331*sin(lat)*sin(slope)+0.375*sin(HL)*sin(slope)
+  return(exp(res))
+}
+
+aspectCalc3 <- function(lat, slope, aspect){##eqn 3 from McCune 2007
+  lat <- lat*pi/180
+  slope <- slope*pi/180
+  aspect <- aspect*pi/180
+  HL <- abs(pi - abs(aspect - (5*pi)/4))
+  res <- 0.339+0.808*cos(lat)*cos(slope)-0.196*sin(lat)*sin(slope)-0.482*cos(HL)*sin(slope)
+  return(res)
+}
+
+###change the name of aspectCalc in this function to use a different equation
+aspectRatio <- function(lat,slope,aspect,refSlope = 20, refAspect = 45){
+  new <- aspectCalc3(lat,slope,aspect)
+  standard <- aspectCalc3(lat = lat, slope = refSlope, aspect = refAspect)
+  return(new/standard)
+}
+
+##modified function from US script
+removeOutlier <- function(dat, alpha,numIDvars){
+  out <- foreach(curr = unique(as.character(dat$Zone)), .combine = rbind) %do% {
+  #out <- foreach(curr = unique(as.character(dat$BGC)), .combine = rbind) %do% {
+    temp <- dat[dat$Zone == curr,]
+    md <- tryCatch(mahalanobis(temp[,-c(1:numIDvars),with = F],
+                               center = colMeans(temp[,-c(1:numIDvars), with = F]), 
+                               cov = cov(temp[,-c(1:numIDvars), with = F])), error = function(e) e)
+    if(!inherits(md,"error")){
+      ctf <- qchisq(1-alpha, df = ncol(temp)-1)
+      outl <- which(md > ctf)
+      cat("Removing", length(outl), "outliers from",curr, "; ")
+      if(length(outl) > 0){
+        temp <- temp[-outl,]
+      }
+    }
+    temp
+    
+  }
+  return(out)
+}
+
+paste3 <- function(...,sep="") {
+     L <- list(...)
+     L <- lapply(L,function(x) {x[is.na(x)] <- ""; x})
+     ret <-gsub(paste0("(^",sep,"|",sep,"$)"),"",
+                 gsub(paste0(sep,sep),sep,
+                      do.call(paste,c(L,list(sep=sep)))))
+     is.na(ret) <- ret==""
+     ret
+}
+
+##recursive function to adjust CMD based on rSMR
+calcCMD <- function(CMD, rSMR){
+  diff <- rSMR - 4
+  if(diff > 0){
+    return(CMD/2^diff)
+  }else if(diff < 0){
+    return(CMD + 100*abs(diff))
+  }else{
+    return(CMD)
+  }
+}
+calcCMD_vec <- Vectorize(calcCMD)
+
+##C++ function to lookup aSMR rules
+cppFunction('NumericVector calcASMR(NumericVector rSMR,NumericVector CMD, DataFrame Rules) {
+  NumericVector rSMRLev = Rules["SMRLevel"];
+  NumericVector CMDctf = Rules["CMD"];
+  NumericVector aSMR = Rules["aSMR"];
+  int len = CMD.length();
+  IntegerVector v;
+  NumericVector out(len);
+  for(int i = 0; i < len; i++){
+    v = Rcpp::seq(0, aSMR.length()-1);
+    if(rSMR[i] < 5){
+      v = v[rSMRLev == 0];
+    }else if(rSMR[i] == 5){
+      v = v[rSMRLev == 5];
+    }else if(rSMR[i] == 6){
+      v = v[rSMRLev == 6];
+    }else{
+      v = v[rSMRLev == 7];
+    }
+    int j;
+    for(j = v[0]; j < v[v.length()-1]; j++){
+      if(CMD[i] <= CMDctf[j]){
+        break;
+      }
+    }
+    out[i] = aSMR[j];
+  }
+  return(out);
+}')
+
+addVars <- function(dat){
+  dat[,`:=`(PPT_MJ = PPT05+PPT06,
+            PPT_JAS = PPT07+PPT08+PPT09,
+            PPT.dormant = PPT_at+PPT_wt)]
+  dat[,`:=`(CMD.def = 500-PPT.dormant)]
+  dat[CMD.def < 0, CMD.def := 0]
+  dat[,`:=`(CMDMax = CMD07,
+            CMD.total = CMD.def +CMD,
+            CMD.grow = CMD05 + CMD06 +CMD07 +CMD08 +CMD09,
+            DD5.grow = DD5_05 + DD5_06 + DD5_07 + DD5_08 + DD5_09,
+            DDgood = DD5 - DD18,
+            DDnew = (DD5_05 + DD5_06 +DD5_07  + DD5_08)  - 
+              (DD18_05 + DD18_06 +DD18_07 +DD18_08),
+            TmaxJuly = Tmax07)]
+
+# remove some redundant variables considered undesireable
+  nms <- as.character(names(dat))
+  toRemove <- c("01", "02", "03", "04", "05", "06","07", "08", "09", "10", "11", "12","Rad","RH")
+  nms <- nms[grep(paste(toRemove,collapse = "|"),nms)]
+  dat[,(nms) := NULL]
+  dat <- dat[CMD != -9999]
+
+  return(dat)
+}
+
+##Set drive with cloud data
+if(dir.exists("C:/users/whmacken/Sync")){
+  cloud_dir <- "C:/users/whmacken/Sync/CCISS_data/"
+}else{
+  cloud_dir <- "C:/Users/kirid/Sync/CCISS_data/"
+}
+
+```
+
+##load and clean data
+```{r load data}
+###USA FIA data#####
+us_veg <- fread("./InputData/AllUSandFIA16Apr2020_Veg.csv")
+cols <- grep("Cover",colnames(us_veg))[1:4] ##only include cover 1,2,3,4
+us_veg <- us_veg[,c(1,2,cols), with = F]
+us_veg[,Cover := rowSums(.SD, na.rm = T),.SDcols = -c("PlotNumber","Species")]
+us_veg <- us_veg[,.(PlotNumber,Species,Cover)]
+
+#bc_veg <- fread("./InputData/BECMaster19_Veg.csv")
+load("./InputData/VegDat_Clean.RData")
+bc_veg <- vegData
+# cols <- grep("Cover",colnames(bc_veg))[1:4] ##only include cover 1,2,3,4
+# bc_veg <- bc_veg[,c(1,2,cols), with = F]
+# bc_veg <- bc_veg[,Cover := rowSums(.SD, na.rm = T),.SDcols = -c("PlotNumber","Species")]
+#bc_veg <- bc_veg[Cover > 0,.(PlotNumber,Species,Cover)]
+
+envAll <- fread("./InputData/BECMaster19_Env.csv")
+us_env <- fread("./InputData/AllUSandFIA16Apr2020_Env.csv")
+envAll <- rbind(envAll, us_env)
+vegData <- rbind(bc_veg, us_veg)
+climDat <- fread("./InputData/EcoPlot_Locations_Normal_1961_1990MSY.csv")#, select = c("ID1","ID2","Latitude","Longitude", "Elevation"))
+climDat <- climDat[!duplicated(climDat, by = "ID1"),]##remove US plots with same PlotNumber
+#fwrite(climDat ,"EcoPlot_Locations.csv")
+##BGC climate data
+# bgcDat <- fread("BGC_ClimDat_Veg_2000-2018.csv",select = c("Year", "ID1","ID2","Latitude", "DD5","Tmax_sm","FFP","Tave_sm","Tmin_wt","CMD"))
+# bgcDat <- bgcDat[Year %in% 2000:2018,]
+# bgcDat <- bgcDat[,lapply(.SD,mean),by = .(ID1,ID2,Latitude), .SDcols = -("Year")]
+# fwrite(bgcDat,"BGC_ClimDat_Veg_2000-2018.csv")
+
+##Prepare data
+envAll <- envAll[Date > as.Date("2001-01-01"),] ##remove old plots
+vegData <- vegData[vegData$Cover >= 0.2,] ### remove entries with low cover
+envPlt <- unique(envAll$PlotNumber)
+vegData <- vegData[vegData$PlotNumber %in% envPlt,]
+envAll <- envAll[envAll$PlotNumber %in% vegData$PlotNumber,]
+
+plotBGC <- envAll[Aspect >= 0 & Aspect <= 360,
+                  c("PlotNumber","Longitude","Latitude","Zone","SubZone","SiteSeries","MoistureRegime","NutrientRegime","SlopeGradient","Aspect")]
+vegSub <- merge(vegData, plotBGC, by = "PlotNumber")
+vegSub <- vegSub[!is.na(vegSub$Longitude) & !is.na(vegSub$SlopeGradient),]
+#vegSub$Aspect[vegSub$SlopeGradient == 0] <- 180
+vegSub <- vegSub[!is.na(vegSub$Aspect) & vegSub$Aspect != 999 & vegSub$SlopeGradient != 999,] ##remove 999
+#covert to degrees - part of function?
+vegSub$Slope <- atan(vegSub$SlopeGradient/100)
+vegSub$Slope <- vegSub$Slope*180/pi ##to radians
+vegSub$Slope <- ifelse(vegSub$Slope >45, 45, vegSub$Slope) ##max limit on slope in calculation
+##calculate aspect ratio of vegetation datalat = vegSub$Latitude,
+vegSub$AspectRatio <- aspectRatio(lat = vegSub$Latitude, slope = vegSub$Slope, aspect = vegSub$Aspect)
+
+###load BEC climate data
+bgcDat <- fread("./InputData/WNA_4k_HexPts_BGC_Normal_1961_1990MSY.csv")
+bgcDat <- addVars(bgcDat)
+suitAll <- fread("./inputs/Feasibility_v11_21.csv")
+
+sppLookup <- fread("./inputs/TreeCrosswalk.csv")
+
+##load edatopic data
+eda <- fread(paste0(cloud_dir,"CommonTables/Edatopic_v11_20.csv"))
+eda <- eda[is.na(Codes),.(BGC,SS_NoSpace,Edatopic)]
+eda[,`:=`(rSMR = as.numeric(substr(Edatopic,2,2)),SNR = substr(Edatopic,1,1))]
+eda <- unique(eda)
+```
+
+##Choose species and variables
+```{r select species and variables}
+climDat <- addVars(dat = climDat)
+climSub <- climDat[,.(ID1, DD5, Tmax_sm, FFP,DD18,Tmin_wt,CMD.total,PPT_at,PPT_wt)] ##select climate variables
+veg_only <- vegSub %>% dplyr::select(-Longitude, -SiteSeries)
+vegClim <- left_join(veg_only, climSub, by = c("PlotNumber" = "ID1"))
+vegClim2 <- vegClim %>% na_if(-9999.0) %>% drop_na() %>% as.data.table()
+temp <- vegClim2[,lapply(.SD,FUN = function(x){x*AspectRatio}), .SDcols = 13:length(vegClim2)]
+##apply aspectratio adjustment to climate variables
+vegAll <- cbind(vegClim2[,1:12],temp)
+```
+
+
+##Loop though species and variables, output faceted figure and create data table of suitability
+
+```{r loops}
+species <- c("Pl","Fd","Sx","Cw")
+vars <- c("DD5","Tmax_sm","FFP","DD18","Tmin_wt")
+
+out <- foreach(sppCode = species, .combine = rbind) %do% {
+  foreach(var = vars, .combine = rbind) %do% {
+    spp <- sppLookup$Code[sppLookup$TreeCode == sppCode]
+    
+    bgDat <- bgcDat[,c("BGC","Latitude",var), with = F]
+    colnames(bgDat)[3] <- "Var"
+    ##remove outliers
+    bgDat <- bgDat[, 
+        .SD[(Var < quantile(Var, probs = 0.99)) & ((Var > quantile(Var, probs = 0.01)))
+        ], by = BGC
+    ]
+    
+    
+    bgDat[,QCold := quantile(Var,0.25),by = BGC]
+    bgDat[,QWarm := quantile(Var,0.75),by = BGC]
+    bgDat[,Level := "Warm"]
+    bgDat[Var < QWarm, Level := "Mid"]
+    bgDat[Var < QCold, Level := "Cold"]
+    
+    t1 <- aspectRatio(lat = bgDat$Latitude, slope = 30, aspect = 135)
+    bgDat[, Neutral := Var+(abs(Var)*(t1-1))]
+    t1 <- aspectRatio(lat = bgDat$Latitude, slope = 30, aspect = 225)
+    bgDat[, Warm := Var+(abs(Var)*(t1-1))]
+    bgAvg <- bgDat[,.(MeanCld = mean(Var),MeanNt = mean(Neutral),MeanWrm = mean(Warm)), keyby = .(BGC,Level)]
+    
+    veg <- vegAll %>% filter(Species == spp) %>% droplevels() %>% dplyr::select(-c(Latitude,Zone,SubZone,MoistureRegime,NutrientRegime,PPT_at,PPT_wt))
+    
+    dat <- veg %>% mutate_if(is.integer, as.numeric)
+    dat2 <- dat[,-c(1:7)]
+  
+    veg <- dat
+    vegHist <- wtd.hist(veg[[var]], plot = F,weight = veg$Cover, breaks = 150)
+    vegTemp <- vegAll[get(var) >= min(vegHist$breaks) & get(var) <= max(vegHist$breaks),c("PlotNumber",..var)]
+    vegTemp <- unique(vegTemp)
+    
+    matHistAll <- hist(vegTemp[[var]], breaks = vegHist$breaks,plot = T)
+    vegHist$counts <- vegHist$counts/matHistAll$counts
+    ctfLow <- ApproxQuantile(vegHist, 0.025)
+    ctfHigh <- ApproxQuantile(vegHist, 0.975)
+    
+    ##I know this code looks awful, but it's actually computationally efficient (much more than ifelse e.g.)
+    bgAvg[,c("Cold","Neutral","Warm") := .(NA,NA,NA)]
+    bgAvg$Neutral[bgAvg$MeanNt < ctfLow] <- "-N"
+    bgAvg$Neutral[bgAvg$MeanNt > ctfHigh] <- "+N"
+    bgAvg$Cold[bgAvg$MeanCld < ctfLow] <- "-C"
+    bgAvg$Cold[bgAvg$MeanCld > ctfHigh] <- "+C"
+    bgAvg$Warm[bgAvg$MeanWrm < ctfLow] <- "-W"
+    bgAvg$Warm[bgAvg$MeanWrm > ctfHigh] <- "+W"
+    
+    outTable <- bgAvg[,.(BGC,Level,Cold,Neutral,Warm)]
+    outTable[, Flag := paste3(Cold,Neutral,Warm)]
+    outTable[is.na(Flag), Flag := "OK"]
+    outTable[!is.na(Cold)&!is.na(Neutral)&!is.na(Warm),Flag := "X"]
+    outTable <- outTable[,c("BGC","Level", "Flag")]
+    outTable[,c('Spp','Var') := .(sppCode,var)]
+    outTable
+  }
+}
+
+BGCflag <- data.table::dcast(out, BGC+Level+Spp ~ Var, value.var = "Flag")
+setorder(BGCflag,BGC,Spp,Level)
+```
+
+### Add feasibility values
+
+```{r addFeas}
+
+feas <- fread(paste0(cloud_dir,"CommonTables/Feasibility_v11_21.csv"))
+feas <- feas[,.(BGC,SS_NoSpace,Spp,Feasible)]
+feas <- feas[grep("01",SS_NoSpace),]
+setkey(feas, BGC, Spp)
+setkey(BGCflag, BGC, Spp)
+feasFlag <- feas[BGCflag]
+```
+
+### Calculate aSMR
+```{r aSMR}
+rules <- fread(paste0(cloud_dir,"CommonTables/aSMR_Rules_HalfStep_v11_09Dec2019.csv"))
+
+SMRdat <- vegAll[!is.na(MoistureRegime) & MoistureRegime!= "",.(PlotNumber,Species,Cover,Zone,SubZone,MoistureRegime,NutrientRegime,CMD.total)] %>% unique()
+
+SMRdat$MoistureRegime <- gsub("\\D","",SMRdat$MoistureRegime)
+SMRdat$MoistureRegime <- gsub("^(.{1}).*","\\1",SMRdat$MoistureRegime) %>% as.numeric()
+SMRdat <- SMRdat[complete.cases(SMRdat),]
+
+SMRdat[, CMDadj := calcCMD_vec(CMD.total,MoistureRegime)]
+SMRdat[, aSMR := calcASMR(MoistureRegime,CMDadj,rules)]
+SMRdat[, aSMR := round(aSMR, digits = 0)]
+
+SMRdat <- SMRdat[,.(PlotNumber,Species,Cover,NutrientRegime,aSMR,CMD.total)]
+
+SMRdat$NutrientRegime <- gsub("^(.{1}).*","\\1",SMRdat$NutrientRegime) %>% toupper()
+#SMRdat <- SMRdat[NutrientRegime %in% c("A","B","C","D","E","F"),]
+```
+
+### Generate curves for aSMR
+```{r SMR curves}
+species <- c("Pl","Fd", "Lw")
+
+out <- foreach(sppCode = species,.combine = rbind) %do% {
+    spp <- sppLookup$Code[sppLookup$TreeCode == sppCode]
+    
+    veg <- SMRdat[Species == spp,]
+    veg <- veg[(CMD.total < quantile(CMD.total, probs = 0.975)) & 
+                 ((CMD.total > quantile(CMD.total, probs = 0.025))),]
+    #veg <- veg[complete.cases(veg),]
+
+    vegHist <- wtd.hist(veg$CMD.total, plot = T,weight = veg$Cover, breaks = 150)
+    
+    vegTemp <- SMRdat[CMD.total >= min(vegHist$breaks) & CMD.total <= max(vegHist$breaks),
+                      c("PlotNumber","CMD.total")]
+    vegTemp <- unique(vegTemp)
+    
+    matHistAll <- hist(vegTemp$CMD.total, breaks = vegHist$breaks,plot = T)
+    vegHist$counts <- vegHist$counts/matHistAll$counts
+    ctfLow <- ApproxQuantile(vegHist, 0.01)
+    ctfHigh <- ApproxQuantile(vegHist, 0.99)
+    
+    bgDat <- bgcDat[,c("BGC","Latitude","CMD.total"), with = F]
+    colnames(bgDat)[3] <- "Var"
+    ##remove outliers
+    bgDat <- bgDat[, 
+        .SD[(Var < quantile(Var, probs = 0.99)) & ((Var > quantile(Var, probs = 0.01)))
+        ], by = BGC
+    ]
+    
+    t1 <- aspectRatio(lat = bgDat$Latitude, slope = 30, aspect = 135)
+    bgDat[, Neutral := Var+(abs(Var)*(t1-1))]
+    t1 <- aspectRatio(lat = bgDat$Latitude, slope = 30, aspect = 225)
+    bgDat[, Warm := Var+(abs(Var)*(t1-1))]
+    bgAvg <- bgDat[,.(MeanCld = mean(Var),MeanNt = mean(Neutral),MeanWrm = mean(Warm)), by = "BGC"]
+    
+    bgAvg <- eda[bgAvg, on = "BGC"]
+    bgAvg[, `:=`(MeanCld = calcCMD_vec(MeanCld,rSMR), 
+                 MeanNt = calcCMD_vec(MeanNt,rSMR),
+                 MeanWrm = calcCMD_vec(MeanWrm,rSMR))]
+    bgAvg[,Edatopic := NULL]
+    bgAvg <- unique(bgAvg, by = c("SS_NoSpace","rSMR"))
+    
+    
+    ##I know this code looks awful, but it's actually computationally efficient (much more than ifelse e.g.)
+    bgAvg[,c("Cold","Neutral","Warm") := .(NA,NA,NA)]
+    bgAvg$Neutral[bgAvg$MeanNt < ctfLow] <- "-N"
+    bgAvg$Neutral[bgAvg$MeanNt > ctfHigh] <- "+N"
+    bgAvg$Cold[bgAvg$MeanCld < ctfLow] <- "-C"
+    bgAvg$Cold[bgAvg$MeanCld > ctfHigh] <- "+C"
+    bgAvg$Warm[bgAvg$MeanWrm < ctfLow] <- "-W"
+    bgAvg$Warm[bgAvg$MeanWrm > ctfHigh] <- "+W"
+    
+    outTable <- bgAvg[,.(BGC,SS_NoSpace,Cold,Neutral,Warm)]
+    outTable[, Flag := paste3(Cold,Neutral,Warm)]
+    outTable[is.na(Flag), Flag := "OK"]
+    outTable[!is.na(Cold)&!is.na(Neutral)&!is.na(Warm),Flag := "X"]
+    outTable <- outTable[,.(BGC,SS_NoSpace,Flag)]
+    outTable[,Spp := sppCode]
+    outTable
+    
+}
+
+
+```
+
+
+

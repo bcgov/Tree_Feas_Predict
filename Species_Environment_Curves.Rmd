@@ -1,0 +1,636 @@
+---
+title: "Species_Environment_Curves"
+author: "Kiri Daust/Will MacKenzie"
+date: "15/05/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#### Fit distribution curves of tree species to climate variable based on BEC plot data
+#### Kiri Daust May 2020
+
+library(data.table)
+library(tidyverse)
+#library(sf)
+library(raster)
+library(ggstance) ##need this for boxplot
+library(foreach)
+library(weights)
+library(minpack.lm) ##this nls algorithm is better
+library(sn)
+library(ggthemes)
+library(gridExtra)
+library(Rcpp)
+require(stats)
+
+#setwd("D:/GitHub/TreeSuitabilityPrediction/")
+
+
+aspectCalc1 <- function(lat, slope, aspect){##eqn 1 from McCune 2007
+  lat <- lat*pi/180
+  slope <- slope*pi/180
+  aspect <- aspect*pi/180
+  HL <- abs(pi - abs(aspect - (5*pi)/4))
+  res <- -1.467+1.582*cos(lat)*cos(slope)-1.5*cos(HL)*sin(slope)*sin(lat)-0.262*sin(lat)*sin(slope)+0.607*sin(HL)*sin(slope)
+  return(exp(res))
+}
+
+aspectCalc2 <- function(lat, slope, aspect){##eqn 2 from McCune 2007
+  lat <- lat*pi/180
+  slope <- slope*pi/180
+  aspect <- aspect*pi/180
+  HL <- abs(pi - abs(aspect - (5*pi)/4))
+  res <- -1.236+1.35*cos(lat)*cos(slope)-1.376*cos(HL)*sin(slope)*sin(lat)-0.331*sin(lat)*sin(slope)+0.375*sin(HL)*sin(slope)
+  return(exp(res))
+}
+
+aspectCalc3 <- function(lat, slope, aspect){##eqn 3 from McCune 2007
+  lat <- lat*pi/180
+  slope <- slope*pi/180
+  aspect <- aspect*pi/180
+  HL <- abs(pi - abs(aspect - (5*pi)/4))
+  res <- 0.339+0.808*cos(lat)*cos(slope)-0.196*sin(lat)*sin(slope)-0.482*cos(HL)*sin(slope)
+  return(res)
+}
+
+###change the name of aspectCalc in this function to use a different equation
+aspectRatio <- function(lat,slope,aspect,refSlope = 20, refAspect = 45){
+  new <- aspectCalc3(lat,slope,aspect)
+  standard <- aspectCalc3(lat = lat, slope = refSlope, aspect = refAspect)
+  return(new/standard)
+}
+
+##modified function from US script
+removeOutlier <- function(dat, alpha,numIDvars){
+  out <- foreach(curr = unique(as.character(dat$Zone)), .combine = rbind) %do% {
+  #out <- foreach(curr = unique(as.character(dat$BGC)), .combine = rbind) %do% {
+    temp <- dat[dat$Zone == curr,]
+    md <- tryCatch(mahalanobis(temp[,-c(1:numIDvars),with = F],
+                               center = colMeans(temp[,-c(1:numIDvars), with = F]), 
+                               cov = cov(temp[,-c(1:numIDvars), with = F])), error = function(e) e)
+    if(!inherits(md,"error")){
+      ctf <- qchisq(1-alpha, df = ncol(temp)-1)
+      outl <- which(md > ctf)
+      cat("Removing", length(outl), "outliers from",curr, "; ")
+      if(length(outl) > 0){
+        temp <- temp[-outl,]
+      }
+    }
+    temp
+    
+  }
+  return(out)
+}
+
+paste3 <- function(...,sep="") {
+     L <- list(...)
+     L <- lapply(L,function(x) {x[is.na(x)] <- ""; x})
+     ret <-gsub(paste0("(^",sep,"|",sep,"$)"),"",
+                 gsub(paste0(sep,sep),sep,
+                      do.call(paste,c(L,list(sep=sep)))))
+     is.na(ret) <- ret==""
+     ret
+}
+
+##recursive function to adjust CMD based on rSMR
+adjCMD <- function(CMD,rSMR, currLevel){
+  if(currLevel == rSMR){
+    return(CMD)
+  }else if(currLevel < rSMR){
+    adjCMD(CMD/2,rSMR,currLevel + 1)
+  }else{
+    adjCMD(CMD+100,rSMR,currLevel-1)
+  }
+}
+
+##C++ function to lookup aSMR rules
+cppFunction('NumericVector calcASMR(NumericVector rSMR,NumericVector CMD, DataFrame Rules) {
+  NumericVector rSMRLev = Rules["SMRLevel"];
+  NumericVector CMDctf = Rules["CMD"];
+  NumericVector aSMR = Rules["aSMR"];
+  int len = CMD.length();
+  IntegerVector v;
+  NumericVector out(len);
+  for(int i = 0; i < len; i++){
+    v = Rcpp::seq(0, aSMR.length()-1);
+    if(rSMR[i] < 5){
+      v = v[rSMRLev == 0];
+    }else if(rSMR[i] == 5){
+      v = v[rSMRLev == 5];
+    }else if(rSMR[i] == 6){
+      v = v[rSMRLev == 6];
+    }else{
+      v = v[rSMRLev == 7];
+    }
+    int j;
+    for(j = v[0]; j < v[v.length()-1]; j++){
+      if(CMD[i] <= CMDctf[j]){
+        break;
+      }
+    }
+    out[i] = aSMR[j];
+  }
+  return(out);
+}')
+
+```
+
+##load and clean data
+```{r load data}
+###USA FIA data#####
+us_veg <- fread("./InputData/AllUSandFIA16Apr2020_Veg.csv")
+cols <- grep("Cover",colnames(us_veg))[1:4] ##only include cover 1,2,3,4
+us_veg <- us_veg[,c(1,2,cols), with = F]
+us_veg[,Cover := rowSums(.SD, na.rm = T),.SDcols = -c("PlotNumber","Species")]
+us_veg <- us_veg[,.(PlotNumber,Species,Cover)]
+
+#bc_veg <- fread("./InputData/BECMaster19_Veg.csv")
+load("./InputData/VegDat_Clean.RData")
+bc_veg <- vegData
+# cols <- grep("Cover",colnames(bc_veg))[1:4] ##only include cover 1,2,3,4
+# bc_veg <- bc_veg[,c(1,2,cols), with = F]
+# bc_veg <- bc_veg[,Cover := rowSums(.SD, na.rm = T),.SDcols = -c("PlotNumber","Species")]
+#bc_veg <- bc_veg[Cover > 0,.(PlotNumber,Species,Cover)]
+
+envAll <- fread("./InputData/BECMaster19_Env.csv")
+us_env <- fread("./InputData/AllUSandFIA16Apr2020_Env.csv")
+envAll <- rbind(envAll, us_env)
+vegData <- rbind(bc_veg, us_veg)
+climDat <- fread("./InputData/EcoPlot_Locations_Normal_1961_1990MSY.csv")#, select = c("ID1","ID2","Latitude","Longitude", "Elevation"))
+climDat <- climDat[!duplicated(climDat, by = "ID1"),]##remove US plots with same PlotNumber
+#fwrite(climDat ,"EcoPlot_Locations.csv")
+##BGC climate data
+# bgcDat <- fread("BGC_ClimDat_Veg_2000-2018.csv",select = c("Year", "ID1","ID2","Latitude", "DD5","Tmax_sm","FFP","Tave_sm","Tmin_wt","CMD"))
+# bgcDat <- bgcDat[Year %in% 2000:2018,]
+# bgcDat <- bgcDat[,lapply(.SD,mean),by = .(ID1,ID2,Latitude), .SDcols = -("Year")]
+# fwrite(bgcDat,"BGC_ClimDat_Veg_2000-2018.csv")
+
+##Prepare data
+envAll <- envAll[Date > as.Date("2001-01-01"),] ##remove old plots
+vegData <- vegData[vegData$Cover >= 0.2,] ### remove entries with low cover
+envPlt <- unique(envAll$PlotNumber)
+vegData <- vegData[vegData$PlotNumber %in% envPlt,]
+envAll <- envAll[envAll$PlotNumber %in% vegData$PlotNumber,]
+
+plotBGC <- envAll[Aspect >= 0 & Aspect <= 360,
+                  c("PlotNumber","Longitude","Latitude","Zone","SubZone","SiteSeries","MoistureRegime","NutrientRegime","SlopeGradient","Aspect")]
+vegSub <- merge(vegData, plotBGC, by = "PlotNumber")
+vegSub <- vegSub[!is.na(vegSub$Longitude) & !is.na(vegSub$SlopeGradient),]
+#vegSub$Aspect[vegSub$SlopeGradient == 0] <- 180
+vegSub <- vegSub[!is.na(vegSub$Aspect) & vegSub$Aspect != 999 & vegSub$SlopeGradient != 999,] ##remove 999
+#covert to degrees - part of function?
+vegSub$Slope <- atan(vegSub$SlopeGradient/100)
+vegSub$Slope <- vegSub$Slope*180/pi ##to radians
+vegSub$Slope <- ifelse(vegSub$Slope >45, 45, vegSub$Slope) ##max limit on slope in calculation
+##calculate aspect ratio of vegetation datalat = vegSub$Latitude,
+vegSub$AspectRatio <- aspectRatio(lat = vegSub$Latitude, slope = vegSub$Slope, aspect = vegSub$Aspect)
+
+###load BEC climate data
+bgcDat <- fread("D:/CommonTables/HexGrids/WNAv12_HexGrid_2km_Normal_1961_1990MSY.csv")
+suitAll <- fread("./inputs/Feasibility_v11_21.csv")
+
+sppLookup <- fread("./inputs/TreeCrosswalk.csv")
+```
+
+##Choose species and variables
+```{r select species and variables}
+climSub <- climDat %>% dplyr::select(ID1, DD5_sm, Tmax_sm, FFP,Tave_sm,Tmin_wt,CMD,PPT_at,PPT_wt) ##select climate variables
+veg_only <- vegSub %>% dplyr::select(-Longitude, -SiteSeries)
+vegClim <- left_join(veg_only, climSub, by = c("PlotNumber" = "ID1"))
+vegClim2 <- vegClim %>% na_if(-9999.0) %>% drop_na() %>% as.data.table()
+##apply aspectratio adjustment to climate variables
+vegClim2[,c('DD5_sm','Tmax_sm','CMD', "MCMT") := .(DD5_sm*AspectRatio,Tmax_sm*AspectRatio,Tave_sm*AspectRatio,CMD*AspectRatio)]
+vegAll <- vegClim2
+```
+
+
+##Loop though species and variables, output faceted figure and create data table of suitability
+
+```{r loops, fig.width=10, fig.height=11}
+species <- c("Pl","Fd","Sx")#, "Pw", "Py", "Bg")
+vars <- c("MCMT", "DD5_sm")
+minNumPlots <- 10 ##remove bins where there are few plots in total
+
+out <- foreach(sppCode = species, .combine = c) %do% {
+  foreach(var = vars, .combine = c) %do% {
+    spp <- sppLookup$Code[sppLookup$TreeCode == sppCode]
+    
+    bgDat <- bgcDat[,c("BGC","Latitude",var), with = F]
+    colnames(bgDat)[3] <- "Var"
+    ##remove outliers
+    bgDat <- bgDat[, 
+        .SD[(Var < quantile(Var, probs = 0.90)) & ((Var > quantile(Var, probs = 0.10)))
+        ], by = BGC
+    ]
+    
+    t1 <- aspectRatio(lat = bgDat$Latitude, slope = 30, aspect = 135)
+    bgDat$Neutral <- bgDat$Var*t1 ###"neutral" aspect
+    t1 <- aspectRatio(lat = bgDat$Latitude, slope = 30, aspect = 225)
+    bgDat$Warm <- bgDat$Var*t1 ###"warm" aspect
+    bgAvg <- bgDat[,.(MeanCld = mean(Var),MeanNt = mean(Neutral),MeanWrm = mean(Warm)), by = "BGC"]
+    bgDat <- bgDat[BGC %in% c("BAFAun", "CMAun", "BWBSdk", "ESSFmc", "SBSdk", "SBSmc2", "ICHmc2","IDFdk3", "PPxh1", "CWHdm", "CWHvm1" ,"BGxh_WA")]
+    bgDat <- bgDat[order(BGC),]
+    
+    suit <- suitAll[Spp == sppCode,.(BGC,SS_NoSpace,Spp,Feasible)]
+    suit <- suit[grep(".*01|.*101",SS_NoSpace),.(BGC,Feasible)]
+    cols <- data.table(Feasible = c(1,2,3,4,5),col = c("green","yellow","red","brown","brown"))
+    suit2 <- suit[cols, on = "Feasible", nomatch = 0]
+    
+    cols <- data.table(BGC = unique(bgDat$BGC))
+    cols <- suit2[cols, on = "BGC"]
+    cols$col[is.na(cols$col)] <- "brown"
+    
+    veg <- vegAll %>% filter(Species == spp) %>% droplevels() %>% dplyr::select(-c(Latitude,Zone,SubZone,MoistureRegime,NutrientRegime,PPT_at,PPT_wt))
+    
+    dat <- veg %>% mutate_if(is.integer, as.numeric)
+    dat2 <- dat[,-c(1:7)]
+    numIDvars = 7
+    alpha = .05
+    md <- mahalanobis(dat2,
+                           center = colMeans(dat2), 
+                           cov = cov(dat2))
+    
+    ctf <- qchisq(1-alpha, df = ncol(dat)-1)
+    outl <- which(md > ctf)
+    dat <- dat[-outl,]
+    veg <- dat
+    
+    brk <- seq(min(vegAll[[var]]),max(vegAll[[var]]),length.out = 25)
+    matHistAll <- hist(vegAll[[var]], breaks = brk,plot = F) ##create histogram of all plots for specified variable
+    histAll <- matHistAll$counts
+    
+    vegHist <- wtd.hist(veg[[var]], plot = F,weight = veg$Cover, breaks = brk)
+    
+    brk <- brk[histAll > minNumPlots]
+    h <- vegHist$counts[histAll > minNumPlots]/histAll[histAll > minNumPlots] ##ratio of weighted veg hist to total num plots in each bin
+    if(length(brk) > length(h)){brk <- brk[-1]} ##depending on the variable sometimes breaks don't line up
+    
+    dat <- data.frame(x = brk, r = h) ##create data for nls
+    muStart <- brk[h == max(h) ] ###starting values for optimisation
+    sdStart <- muStart/4
+    kStart <- muStart/2
+    
+    fit <- nlsLM(r ~ k * dsn(x,xi = mu,omega = sigma, alpha = a), start=c(mu=muStart,sigma=sdStart,k=kStart,a = 1) , # a=0
+                 data = dat)
+    v <- summary(fit)$parameters[,"Estimate"] ###v contains the 4 parameters for the best fit curve
+    plotNrm <- function(x) {v[3] * dsn(x, v[1],v[2],v[4])}
+    mX <- optimize(plotNrm, interval = c(min(dat$x-10),max(dat$x + 10)), maximum = T) ##find maximum
+    probMx <- psn(mX$maximum,xi = v[1],omega = v[2],alpha = v[4]) ##find area below maximum
+    ##set up quantiles for colouring
+    quants <- qsn(c(probMx/10,probMx/2,probMx+(1-probMx)*0.5,probMx+(1-probMx)*0.9),xi = v[1],omega = v[2],alpha = v[4])
+    quants <- c(min(dat$x-10),quants,max(dat$x + 10))
+    if(quants[1] > quants[2]){quants[1] <- quants[2]-10}
+    if(quants[6] < quants[5]){quants[6] <- quants[5]+10}
+    lims <- qsn(c(0.01,0.99),xi = v[1],omega = v[2],alpha = v[4])
+    
+    bgAvgAll <- bgAvg
+    bgAvg <- bgAvg[suit, on = "BGC"]
+    bgAvg <- bgAvg[!is.na(MeanCld),]
+    ctfLow <- min(bgAvg$MeanCld[bgAvg$Feasible == 1])
+    horizLow <- plotNrm(ctfLow)
+    ctfHigh <- max(bgAvg$MeanWrm[bgAvg$Feasible == 1])
+    
+    ##I know this code looks awful, but it's actually computationally efficient (much more than ifelse e.g.)
+    bgAvgAll[,c("Cold","Neutral","Warm") := .(NA,NA,NA)]
+    bgAvgAll$Neutral[bgAvgAll$MeanNt < ctfLow] <- "-N"
+    bgAvgAll$Neutral[bgAvgAll$MeanNt < lims[1]] <- "--N"
+    bgAvgAll$Neutral[bgAvgAll$MeanNt > ctfHigh] <- "+N"
+    bgAvgAll$Neutral[bgAvgAll$MeanNt > lims[2]] <- "++N"
+    bgAvgAll$Cold[bgAvgAll$MeanCld < ctfLow] <- "-C"
+    bgAvgAll$Cold[bgAvgAll$MeanCld < lims[1]] <- "--C"
+    bgAvgAll$Cold[bgAvgAll$MeanCld > ctfHigh] <- "+C"
+    bgAvgAll$Cold[bgAvgAll$MeanCld > lims[2]] <- "++C"
+    bgAvgAll$Warm[bgAvgAll$MeanWrm < ctfLow] <- "-W"
+    bgAvgAll$Warm[bgAvgAll$MeanWrm < lims[1]] <- "--w"
+    bgAvgAll$Warm[bgAvgAll$MeanWrm > ctfHigh] <- "+W"
+    bgAvgAll$Warm[bgAvgAll$MeanWrm > lims[2]] <- "++W"
+    
+    outTable <- bgAvgAll[,.(BGC,Cold,Neutral,Warm)]
+    outTable[,c('Spp','Var') := .(sppCode,var)]
+    
+    colScale <- cols$col
+    names(colScale) <- cols$BGC
+    
+    ##plot response curve
+    p1 <- ggplot(dat)+
+      geom_point(aes(x = x, y = r),color = "black")+
+      stat_function(fun = plotNrm, colour = "black")+
+      geom_ribbon(data = data.frame(y = plotNrm(seq(quants[3],quants[4],0.1)),x = seq(quants[3],quants[4],0.1)), aes(ymin = 0,ymax = y,x =x), alpha = 0.5, fill = "green")+
+      geom_ribbon(data = data.frame(y = plotNrm(seq(quants[2],quants[3],0.1)),x = seq(quants[2],quants[3],0.1)), aes(ymin = 0,ymax = y,x =x), alpha = 0.5, fill = "yellow")+
+      geom_ribbon(data = data.frame(y = plotNrm(seq(quants[4],quants[5],0.1)),x = seq(quants[4],quants[5],0.1)), aes(ymin = 0,ymax = y,x =x), alpha = 0.5, fill = "yellow")+
+      geom_ribbon(data = data.frame(y = plotNrm(seq(quants[1],quants[2],0.1)),x = seq(quants[1],quants[2],0.1)), aes(ymin = 0,ymax = y,x =x), alpha = 0.5, fill = "red")+
+      geom_ribbon(data = data.frame(y = plotNrm(seq(quants[5],quants[6],0.1)),x = seq(quants[5],quants[6],0.1)), aes(ymin = 0,ymax = y,x =x), alpha = 0.5, fill = "red")+
+      geom_vline(xintercept = ctfLow)+
+      geom_vline(xintercept = ctfHigh)+
+      geom_hline(yintercept = horizLow)+
+      xlim(lims)+
+      ylim(c(0,NA))+
+      labs(y = "Standardised Frequency", title = paste(spp, var))+
+      theme_few()+
+      theme(axis.title.x = element_blank(),
+            axis.text.x = element_blank())
+    
+    p2 <- ggplot(bgDat,aes(y = BGC,group = BGC,col = BGC))+
+      geom_boxploth(aes(x = Neutral))+
+      geom_boxploth(aes(x = Warm))+
+      geom_boxploth(aes(x = Var))+
+      scale_colour_manual(values = colScale)+
+      xlim(lims)+
+      geom_vline(xintercept = ctfLow)+
+      geom_vline(xintercept = ctfHigh)+
+      labs(y = "BGC", x = var)+
+      theme_few()+
+      theme(legend.position = "none")
+    
+    outPlt <- cowplot::plot_grid(p1, p2, align = "v", ncol = 1, rel_heights = c(0.66, 0.34))
+    list(Graph = outPlt, Data = outTable)
+  }
+}
+grList <- out[seq(1,length(species)*length(vars)*2,by = 2)]
+dat <- do.call(rbind, out[seq(2,length(species)*length(vars)*2,by = 2)])
+dat[, Suit := paste3(Cold,Neutral,Warm)]
+dat$Suit[is.na(dat$Suit)] <- "OK"
+dat$Suit[!is.na(dat$Cold)&!is.na(dat$Neutral)&!is.na(dat$Warm)] <- "X" ##suitability codes
+grid.arrange(grobs = grList, ncol = 3) ##plot
+```
+
+### Calculate aSMR
+```{r aSMR}
+SMRdat <- vegAll[!is.na(MoistureRegime) & MoistureRegime!= "",-c("Species","Cover","DD5","Tmax_sm","Tave_sm","FFP","Tmin_wt")] %>% unique()
+SMRdat$PPT.dorm <- SMRdat$PPT_at + SMRdat$PPT_wt
+SMRdat$Def <- 300 - SMRdat$PPT.dorm ###adds deficit from incomplete recharge in dormant season. 
+SMRdat$Def[SMRdat$Def < 0] <- 0
+SMRdat$CMD <- SMRdat$CMD + SMRdat$Def
+SMRdat$MoistureRegime <- gsub("\\D","",SMRdat$MoistureRegime)
+SMRdat$MoistureRegime <- gsub("^(.{1}).*","\\1",SMRdat$MoistureRegime) %>% as.numeric()
+SMRdat <- SMRdat[complete.cases(SMRdat),]
+
+### adjust CMD based on rSMR
+SMRdat$CMD2 <- apply(SMRdat[,.(CMD,MoistureRegime)],MARGIN = 1,FUN = function(x){adjCMD(x[1],x[2],4)})
+rules <- fread("./inputs/aSMR_Rules_HalfStep.csv")
+
+### Calculate aSMR from ruleset
+SMRdat$aSMR <- calcASMR(SMRdat$MoistureRegime,SMRdat$CMD2,rules)
+SMRdat <- SMRdat[,.(PlotNumber,NutrientRegime,aSMR)]
+
+SMRdat$NutrientRegime <- gsub("^(.{1}).*","\\1",SMRdat$NutrientRegime) %>% toupper()
+SMRdat <- SMRdat[NutrientRegime %in% c("A","B","C","D","E","F"),]
+```
+
+### Generate curves for aSMR
+```{r SMR curves}
+species <- species <- c("Pl","Fd", "Lw")
+minNumPlots <- 10 ##remove bins where there are few plots in total
+brk <- seq(0,8,length.out = 17)
+matHistAll <- hist(SMRdat$aSMR, breaks = brk,plot = T) ##create histogram of all plots for specified variable
+histAll <- matHistAll$counts
+
+out <- foreach(sppCode = species,.combine = c) %do% {
+    spp <- sppLookup$Code[sppLookup$TreeCode == sppCode]
+    
+    brk <- seq(0,8,length.out = 17)
+    veg <- vegAll[Species == spp,.(PlotNumber,Species,Cover)]
+    veg <- SMRdat[veg, on = "PlotNumber",nomatch = 0]
+    veg <- veg[complete.cases(veg),]
+
+    vegHist <- wtd.hist(veg$aSMR, plot = F,weight = veg$Cover, breaks = brk)
+    
+    brk <- brk[histAll > minNumPlots]
+    h <- vegHist$counts[histAll > minNumPlots]/histAll[histAll > minNumPlots] ##ratio of weighted veg hist to total num plots in each bin
+    if(length(brk) > length(h)){brk <- brk[-1]} ##depending on the variable sometimes breaks don't line up
+    
+    dat <- data.frame(x = brk, r = h) ##create data for nls
+    muStart <- brk[h == max(h) ] ###starting values for optimisation
+    sdStart <- muStart/4
+    kStart <- muStart/2
+    aStart <- 10
+    
+    fit <- nlsLM(r ~ k * dsn(x,xi = mu,omega = sigma, alpha = a), start=c(mu=muStart,sigma=sdStart,k=kStart,a = aStart) , # a=0
+                 data = dat)
+    v <- summary(fit)$parameters[,"Estimate"] ###v contains the 4 parameters for the best fit curve
+    mX <- optimize(plotNrm, interval = c(min(dat$x-10),max(dat$x + 10)), maximum = T) ##find maximum
+    probMx <- psn(mX$maximum,xi = v[1],omega = v[2],alpha = v[4]) ##find area below maximum
+    plotNrm <- function(x) {v[3] * dsn(x, v[1],v[2],v[4])}
+    
+    quants <- qsn(c(probMx/10,probMx/2,probMx+(1-probMx)*0.5,probMx+(1-probMx)*0.9),xi = v[1],omega = v[2],alpha = v[4])
+    quants <- c(min(dat$x-10),quants,max(dat$x + 10))
+    if(quants[1] > quants[2]){quants[1] <- quants[2]-10}
+    if(quants[6] < quants[5]){quants[6] <- quants[5]+10}
+    lims <- qsn(c(0.01,0.99),xi = v[1],omega = v[2],alpha = v[4])
+    
+    p1 <- ggplot(dat)+
+      geom_point(aes(x = x, y = r),color = "black")+
+      #stat_function(fun = plotNrm, colour = "black")+
+      geom_ribbon(data = data.frame(y = plotNrm(seq(quants[3],quants[4],0.1)),x = seq(quants[3],quants[4],0.1)), aes(ymin = 0,ymax = y,x =x), alpha = 0.5, fill = "green")+
+      geom_ribbon(data = data.frame(y = plotNrm(seq(quants[2],quants[3],0.1)),x = seq(quants[2],quants[3],0.1)), aes(ymin = 0,ymax = y,x =x), alpha = 0.5, fill = "yellow")+
+      geom_ribbon(data = data.frame(y = plotNrm(seq(quants[4],quants[5],0.1)),x = seq(quants[4],quants[5],0.1)), aes(ymin = 0,ymax = y,x =x), alpha = 0.5, fill = "yellow")+
+      geom_ribbon(data = data.frame(y = plotNrm(seq(quants[1],quants[2],0.1)),x = seq(quants[1],quants[2],0.1)), aes(ymin = 0,ymax = y,x =x), alpha = 0.5, fill = "red")+
+      geom_ribbon(data = data.frame(y = plotNrm(seq(quants[5],quants[6],0.1)),x = seq(quants[5],quants[6],0.1)), aes(ymin = 0,ymax = y,x =x), alpha = 0.5, fill = "red")+
+      xlim(lims)+
+      ylim(c(0,NA))+
+      labs(y = "Standardised Frequency",x = "aSMR", title = paste(spp, "aSMR"))+
+      theme_few()
+    
+    list(p1)
+}
+grid.arrange(grobs = out, ncol = 2) ##plot
+
+```
+
+### SNR
+
+```{r snr curve}
+species <- species <- c("Pl","Fd","Sx","Py")
+SMRdat <- SMRdat[NutrientRegime != "F",]
+SMRdat$NutrientRegime <- as.factor(SMRdat$NutrientRegime)
+matHistAll <- barplot(table(SMRdat$NutrientRegime)) ##create histogram of all plots for specified variable
+histAll <- table(SMRdat$NutrientRegime)
+
+par(mfrow = c(2,2))
+
+foreach(sppCode = species,.combine = c) %do% {
+    spp <- sppLookup$Code[sppLookup$TreeCode == sppCode]
+    
+    veg <- vegAll[Species == spp,.(PlotNumber,Species,Cover)]
+    veg <- SMRdat[veg, on = "PlotNumber",nomatch = 0]
+    veg <- veg[complete.cases(veg),]
+
+    vegHist <- veg[,.(CovSum = sum(Cover)), by = NutrientRegime]
+    setorder(vegHist,NutrientRegime)
+    h <- vegHist$CovSum/histAll
+    
+    barplot(h,xlab = "SNR",ylab = "Standardised Cover", main = spp)
+    NULL
+}
+```
+
+
+
+
+
+###Old Code -- to do each one individually###
+
+```{r species by variable}
+## lower limit of these variables: DD5_sm, 
+
+var = "Tmax_sm"
+brk <- seq(min(vegAll[[var]]),max(vegAll[[var]]),length.out = 40)
+matHistAll <- hist(vegAll[[var]], breaks = brk) ##create histogram of all plots for specified variable
+histAll <- matHistAll$counts
+
+###now for specified species
+spp = "PINUCON"
+sppCode = "Pl"
+veg <- vegAll %>% filter(Species == spp) %>% droplevels()# & PlotNumber %in% vegAll$PlotNumber,]
+#veg <- veg[Tmax_sm > -10,]
+#veg <- veg[!duplicated(veg, by = "PlotNumber"),]
+#veg <- veg[,c(1:13,19,14:18),with = F]
+#veg <- removeOutlier2(dat = veg, alpha = 0.01, numIDvars = 7) ###also remove outliers once it's just plots containing said species
+dat <- veg
+numIDvars = 7
+alpha = .01
+md <- mahalanobis(dat[,-c(1:numIDvars)],
+                       center = colMeans(dat[,-c(1:numIDvars)]), 
+                       cov = cov(dat[,-c(1:numIDvars)]))
+
+ctf <- qchisq(1-alpha, df = ncol(dat)-1)
+outl <- which(md > ctf)
+dat <- dat[-outl,]
+veg <- dat
+
+matHistspp <- hist(veg[[var]], breaks = brk) ##create histogram of all plots for specified variable
+```
+
+```{r distribution of species across variables}
+vegHist <- wtd.hist(veg[[var]], plot = T,weight = veg$Cover, breaks = brk)
+minNumPlots <- 10 ##remove bins where there are few plots in total
+brk <- brk[histAll > minNumPlots]
+h <- vegHist$counts[histAll > minNumPlots]/histAll[histAll > minNumPlots] ##ratio of weighted veg hist to total num plots in each bin
+if(length(brk) > length(h)){brk <- brk[-1]} ##depending on the variable sometimes breaks don't line up
+
+plot(h ~ brk)
+dat <- data.frame(x = brk, r = h) ##create data for nls
+muStart <- brk[h == max(h) ] ###starting values for optimisation
+sdStart <- muStart/4
+
+#nrm <- formula(r ~ k*exp(-1/2*(x-mu)^2/sigma^2))
+
+###non-linear least squares fit for optimal parameters
+###note that we have to multiply the dsn function by a constant, otherwise integrates to 1
+###Occasionally the nls algorithm gets stuck if the starting values aren't close enough - if this happens, try and make the initial values better
+fit <- nlsLM(r ~ k * dsn(x,xi = mu,omega = sigma, alpha = a), start=c(mu=muStart,sigma=sdStart,k=muStart,a = 1) , # a=0
+             data = dat)
+v <- summary(fit)$parameters[,"Estimate"] ###v contains the 4 parameters for the best fit curve
+```
+
+##set up BGC subzone data
+note that you can adjust the neutral parameters in the aspectRation function
+green = 1, yellow = 2, red = 3, brown = 4,5 or NA
+```{r Environmental space of BGCs aspect adjusted}
+bgcDat <- fread("WNA_4k_HexPts_BGC_Normal_1961_1990MSY.csv")
+var <- "Tmax_sm"
+bgDat <- bgcDat[,c("BGC","Latitude",var), with = F]
+colnames(bgDat)[3] <- "Var"
+##remove outliers
+bgDat <- bgDat[, 
+    .SD[(Var < quantile(Var, probs = 0.90)) & ((Var > quantile(Var, probs = 0.10)))
+    ], by = BGC
+]
+
+
+t1 <- aspectRatio(lat = bgDat$Latitude, slope = 30, aspect = 135)
+bgDat$Neutral <- bgDat$Var*t1 ###"neutral" aspect
+t1 <- aspectRatio(lat = bgDat$Latitude, slope = 30, aspect = 225)
+bgDat$Warm <- bgDat$Var*t1 ###"warm" aspect
+
+bgAvg <- bgDat[,.(MeanCld = mean(Var),MeanWrm = mean(Warm)), by = "BGC"]
+
+suit <- fread("Feasibility_v11_21.csv")
+suit <- suit[Spp == sppCode,.(BGC,SS_NoSpace,Spp,Feasible)]
+suit <- suit[grep(".*01|.*101",SS_NoSpace),.(BGC,Feasible)]
+cols <- data.table(Feasible = c(1,2,3,4,5),col = c("green","yellow","red","brown","brown"))
+suit2 <- suit[cols, on = "Feasible", nomatch = 0]
+###select units to display
+bgDat <- bgDat[BGC %in% c("BAFAun", "BWBSdk", "ESSFmc", "SBSdk", "SBSmc2", "ICHmc2","ICHmc1", "SBSdw3", "IDFdk3", "PPxh1"),]
+bgDat <- bgDat[order(BGC),]
+
+cols <- data.table(BGC = unique(bgDat$BGC))
+cols <- suit2[cols, on = "BGC"]
+cols$col[is.na(cols$col)] <- "brown"
+
+library(ggthemes)
+
+###horizonal boxplot
+clim <- ggplot(bgDat)+
+  geom_boxploth(aes(x = Neutral, y = BGC, group = BGC),colour = cols$col)+
+  geom_boxploth(aes(x = Warm, y = BGC, group = BGC),colour = cols$col)+
+  geom_boxploth(aes(x = Var, y = BGC, group = BGC),colour = cols$col)+
+  #xlim(c(min(dat$x-10),max(dat$x + 10)))+
+  labs(y = "BGC", x = var)+
+  theme_few()
+
+plot(clim)
+```
+
+
+##function to plot best fit skewed normal
+```{r build species curves}
+plotNrm <- function(x) {v[3] * dsn(x, v[1],v[2],v[4])}
+mX <- optimize(plotNrm, interval = c(min(dat$x-10),max(dat$x + 10)), maximum = T) ##find maximum
+probMx <- psn(mX$maximum,xi = v[1],omega = v[2],alpha = v[4]) ##find area below maximum
+##set up quantiles for colouring
+quants <- qsn(c(probMx/10,probMx/2,probMx+(1-probMx)*0.5,probMx+(1-probMx)*0.9),xi = v[1],omega = v[2],alpha = v[4])
+quants <- c(min(dat$x-10),quants,max(dat$x + 10))
+if(quants[1] > quants[2]){quants[1] <- quants[2]-10}
+if(quants[6] < quants[5]){quants[6] <- quants[5]+10}
+lims <- qsn(c(0.001,0.999),xi = v[1],omega = v[2],alpha = v[4])
+
+bgAvg <- bgAvg[suit, on = "BGC"]
+bgAvg <- bgAvg[!is.na(MeanCld),]
+ctfLow <- min(bgAvg$MeanCld[bgAvg$Feasible == 1])
+horizLow <- plotNrm(ctfLow)
+ctfHigh <- max(bgAvg$MeanWrm[bgAvg$Feasible == 1])
+
+##plot response curve
+p1 <- ggplot(dat)+
+  geom_point(aes(x = x, y = r),color = "black")+
+  stat_function(fun = plotNrm, colour = "black")+
+  geom_ribbon(data = data.frame(y = plotNrm(seq(quants[3],quants[4],0.1)),x = seq(quants[3],quants[4],0.1)), aes(ymin = 0,ymax = y,x =x), alpha = 0.5, fill = "green")+
+  geom_ribbon(data = data.frame(y = plotNrm(seq(quants[2],quants[3],0.1)),x = seq(quants[2],quants[3],0.1)), aes(ymin = 0,ymax = y,x =x), alpha = 0.5, fill = "yellow")+
+  geom_ribbon(data = data.frame(y = plotNrm(seq(quants[4],quants[5],0.1)),x = seq(quants[4],quants[5],0.1)), aes(ymin = 0,ymax = y,x =x), alpha = 0.5, fill = "yellow")+
+  geom_ribbon(data = data.frame(y = plotNrm(seq(quants[1],quants[2],0.1)),x = seq(quants[1],quants[2],0.1)), aes(ymin = 0,ymax = y,x =x), alpha = 0.5, fill = "red")+
+  geom_ribbon(data = data.frame(y = plotNrm(seq(quants[5],quants[6],0.1)),x = seq(quants[5],quants[6],0.1)), aes(ymin = 0,ymax = y,x =x), alpha = 0.5, fill = "red")+
+  geom_vline(xintercept = ctfLow)+
+  geom_vline(xintercept = ctfHigh)+
+  geom_hline(yintercept = horizLow)+
+  xlim(lims)+
+  ylim(c(0,NA))+
+  labs(y = "Standardised Frequency", title = paste(spp, var))+
+  theme_few()+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+
+p2 <- ggplot(bgDat)+
+  geom_boxploth(aes(x = Neutral, y = BGC, group = BGC),colour = cols$col)+
+  geom_boxploth(aes(x = Warm, y = BGC, group = BGC),colour = cols$col)+
+  geom_boxploth(aes(x = Var, y = BGC, group = BGC),colour = cols$col)+
+  xlim(lims)+
+  geom_vline(xintercept = ctfLow)+
+  geom_vline(xintercept = ctfHigh)+
+  labs(y = "BGC", x = var)+
+  theme_few()
+ggplot_build(p2)$data[[1]]
+###stack vertically using cowplot library
+cowplot::plot_grid(p1, p2, align = "v", ncol = 1, rel_heights = c(0.66, 0.34))
+```
+
+
+
+
+
+
+
+
+
+
